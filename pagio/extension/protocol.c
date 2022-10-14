@@ -655,6 +655,10 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             obj = Py_None;
         }
         else {
+            if (*buf + val_len > end) {
+                PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
+                return -1;
+            }
             obj = self->pg_converters[i](self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
@@ -900,14 +904,15 @@ typedef struct {
         double float8;
     } val;
     int len;
-    unsigned int oid;
     int flags;
-    short format;
     PyObject *obj;
 } ParamInfo;
 
 
-static int fill_unicode_info(ParamInfo *param_info, PyObject *param) {
+static int
+fill_unicode_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     Py_ssize_t size;
 
     param_info->ptr = PyUnicode_AsUTF8AndSize(param, &size);
@@ -921,7 +926,9 @@ static int fill_unicode_info(ParamInfo *param_info, PyObject *param) {
 
 
 static int
-fill_object_info(ParamInfo *param_info, PyObject *param) {
+fill_object_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     PyObject *str_param;
     int ret;
 
@@ -929,7 +936,7 @@ fill_object_info(ParamInfo *param_info, PyObject *param) {
     if (str_param == NULL) {
         return -1;
     }
-    ret = fill_unicode_info(param_info, str_param);
+    ret = fill_unicode_info(param_info, oid, p_fmt, str_param);
     if (ret == 0) {
         param_info->obj = str_param;
     }
@@ -941,22 +948,27 @@ fill_object_info(ParamInfo *param_info, PyObject *param) {
 
 
 static int
-fill_bool_info(ParamInfo *param_info, PyObject *param) {
+fill_bool_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     param_info->val.c = (param == Py_True);
-    param_info->oid = BOOLOID;
-    param_info->format = 1;
     param_info->len = 1;
     param_info->ptr = (char *)&param_info->val;
+    *oid = BOOLOID;
+    *p_fmt = 1;
     return 0;
 }
 
 
-static int _fill_longlong_info(ParamInfo *param_info, long long val) {
-    param_info->oid = INT8OID;
-    param_info->format = 1;
+static int
+_fill_longlong_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, long long val)
+{
     param_info->val.int8 = htobe64(val);
     param_info->len = 8;
     param_info->ptr = (char *)&param_info->val;
+    *oid = INT8OID;
+    *p_fmt = 1;
     return 0;
 }
 
@@ -964,21 +976,25 @@ static int _fill_longlong_info(ParamInfo *param_info, long long val) {
 #if SIZEOF_LONG == 4    /* for example on windows or 32 bits linux */
 
 static int
-fill_longlong_info(ParamInfo *param_info, PyObject *param) {
+fill_longlong_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     long long val;
     int overflow;
 
     val = PyLong_AsLongLongAndOverflow(param, &overflow);
     if (overflow) {
-        return fill_object_info(param_info, param);
+        return fill_object_info(param_info, oid, p_fmt, param);
     }
-    return _fill_longlong_info(param_info, val);
+    return _fill_longlong_info(param_info, oid, p_fmt, val);
 }
 
 #endif
 
 static int
-fill_long_info(ParamInfo *param_info, PyObject *param) {
+fill_long_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     long val;
     int overflow;
 
@@ -986,64 +1002,67 @@ fill_long_info(ParamInfo *param_info, PyObject *param) {
 #if SIZEOF_LONG == 4    /* for example on windows or 32 bits linux */
     if (overflow) {
         /* value does not fit in 32 bits, try with 64 bit integer instead */
-        return fill_longlong_info(param_info, param);
+        return fill_longlong_info(param_info, oid, p_fmt, param);
     }
 #else                   /* for example 64 bits linux */
     if (overflow) {
         /* value does not fit in 64 bits, use text instead */
-        return fill_object_info(param_info, param);
+        return fill_object_info(param_info, oid, p_fmt, param);
     }
     if (val < INT32_MIN || val > INT32_MAX) {
         /* value outside 32 bit range, use 64 bit integer instead */
-        return _fill_longlong_info(param_info, val);
+        return _fill_longlong_info(param_info, oid, p_fmt, val);
     }
 #endif
     /* value fits in 32 bits, set up parameter */
-    param_info->oid = INT4OID;
-    param_info->format = 1;
     param_info->val.int4 = htobe32((int) val);
     param_info->len = 4;
     param_info->ptr = (char *)&param_info->val;
+    *oid = INT4OID;
+    *p_fmt = 1;
     return 0;
 }
 
 
 static int
-fill_float_info(ParamInfo *param_info, PyObject *param) {
+fill_float_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
     union {
         long long int8;
         double float8;
     } val;
     val.float8 = PyFloat_AsDouble(param);
     param_info->val.int8 = htobe64(val.int8);
-    param_info->oid = FLOAT8OID;
-    param_info->format = 1;
     param_info->len = 8;
     param_info->ptr = (char *)&param_info->val;
+    *oid = FLOAT8OID;
+    *p_fmt = 1;
     return 0;
 }
 
 
 static int
-fill_param_info(ParamInfo *param_info, PyObject *param)
+fill_param_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
     if (param == Py_None) {
         param_info->len = -1;
         return 0;
     }
     if (PyUnicode_Check(param)) {
-        return fill_unicode_info(param_info, param);
+        return fill_unicode_info(param_info, oid, p_fmt, param);
     }
     if (PyBool_Check(param)) {
-        return fill_bool_info(param_info, param);
+        return fill_bool_info(param_info, oid, p_fmt, param);
     }
     if (PyLong_Check(param)) {
-        return fill_long_info(param_info, param);
+        return fill_long_info(param_info, oid, p_fmt, param);
     }
     if (PyFloat_Check(param)) {
-        return fill_float_info(param_info, param);
+        return fill_float_info(param_info, oid, p_fmt, param);
     }
-    return fill_object_info(param_info, param);
+    return fill_object_info(param_info, oid, p_fmt, param);
 }
 
 
@@ -1092,11 +1111,13 @@ static PyObject *
 execute_message_params(
     char *sql, int sql_len, PyObject *params, int result_format)
 {
-    Py_ssize_t stmt_name_len=1, portal_name_len=1, num_params, total_length;
+    Py_ssize_t stmt_name_len=0, portal_name_len=0, num_params, total_length;
     char *stmt_name = "", *portal_name = "", *buf;
     int param_vals_len=0, bind_length, parse_len, describe_len, execute_len, i;
     ParamInfo *param_info = NULL;
     PyObject *py_buf = NULL;
+    unsigned int *oids = NULL;
+    short *p_formats = NULL;
 
     num_params = PyTuple_GET_SIZE(params);
     if (num_params > INT16_MAX) {
@@ -1109,25 +1130,40 @@ execute_message_params(
             PyErr_NoMemory();
             goto end;
         }
+        oids = PyMem_Calloc(num_params, sizeof(unsigned int));
+        if (oids == NULL) {
+            PyErr_NoMemory();
+            goto end;
+        }
+        p_formats = PyMem_Calloc(num_params, sizeof(p_formats));
+        if (p_formats == NULL) {
+            PyErr_NoMemory();
+            goto end;
+        }
     }
     for (i = 0; i < num_params; i++) {
         ParamInfo *p_info = param_info + i;
-        if (fill_param_info(p_info, PyTuple_GetItem(params, i)) == -1) {
+        unsigned int oid = 0;
+        short p_format = 0;
+        if (fill_param_info(
+                p_info, &oid, &p_format, PyTuple_GET_ITEM(params, i)) == -1) {
             goto end;
         }
         if (p_info->len > 0) {
             param_vals_len += p_info->len;
         }
+        oids[i] = htobe32(oid);
+        p_formats[i] = htobe16(p_format);
     }
 
     // Parse:
     //      identifier 'P' (1)
     //      message length (4)
-    //      stmt_name (stmt_name_len)
+    //      stmt_name (stmt_name_len + 1)
     //      sql (sql_len + 1)
     //      num_params (2)
     //      param_oids (num_params * 4)
-    parse_len = 7;
+    parse_len = 8;
     if (safe_add(&parse_len, stmt_name_len) == -1) {
         return NULL;
     }
@@ -1142,8 +1178,8 @@ execute_message_params(
     // Bind:
     //      identifier 'B' (1)
     //      message length (4)
-    //      portal name (portal_name_len)
-    //      stmt_name (stmt_name_len)
+    //      portal name (portal_name_len + 1)
+    //      stmt_name (stmt_name_len + 1)
     //      num_params (2)
     //      param formats (num_params * 2)
     //      num_params (2)
@@ -1152,7 +1188,7 @@ execute_message_params(
     //          param values length (param_vals_len)
     //      num_result_formats=1 (2)
     //      result_format (2)
-    bind_length = 12;
+    bind_length = 14;
     if (safe_add(&bind_length, portal_name_len) == -1) {
         return NULL;
     }
@@ -1171,8 +1207,8 @@ execute_message_params(
     //      'D' (1)
     //      message length (4)
     //      type='P' (1)
-    //      portal name (portal_name_len)
-    describe_len = 5;
+    //      portal name (portal_name_len + 1)
+    describe_len = 6;
     if (safe_add(&describe_len, portal_name_len) == -1) {
         return NULL;
     }
@@ -1181,9 +1217,9 @@ execute_message_params(
     // Execute:
     //      'E' (1)
     //      message length (4)
-    //      portal name (portal_name_len)
+    //      portal name (portal_name_len + 1)
     //      num_rows=0 (4)
-    execute_len = 8;
+    execute_len = 9;
     if (safe_add(&execute_len, portal_name_len) == -1) {
         return NULL;
     }
@@ -1191,7 +1227,7 @@ execute_message_params(
 
     // Sync:
     //      'S' (1)
-    //      message length (4)
+    //      message length=4 (4)
     total_length += 5;
 
     py_buf = PyBytes_FromStringAndSize(NULL, total_length);
@@ -1203,23 +1239,23 @@ execute_message_params(
     // parse
     buf++[0] = 'P';
     write_int4(&buf, parse_len);
-    write_string(&buf, stmt_name, stmt_name_len);
+    write_string(&buf, stmt_name, stmt_name_len + 1);
     write_string(&buf, sql, sql_len + 1);
     write_int2(&buf, (short)num_params);
-    for (i = 0; i < num_params; i++) {
-        ParamInfo *p_info = param_info + i;
-        write_uint4(&buf, p_info->oid);
+    if (num_params) {
+        write_string(
+            &buf, (const char *)oids, num_params * sizeof(unsigned int));
     }
 
     // bind
     buf++[0] = 'B';
     write_int4(&buf, bind_length);
-    write_string(&buf, portal_name, portal_name_len);
-    write_string(&buf, stmt_name, stmt_name_len);
+    write_string(&buf, portal_name, portal_name_len + 1);
+    write_string(&buf, stmt_name, stmt_name_len + 1);
     write_int2(&buf, (short)num_params);
-    for (i = 0; i < num_params; i++) {
-        ParamInfo *p_info = param_info + i;
-        write_int2(&buf, p_info->format);
+    if (num_params) {
+        write_string(
+            &buf, (const char *)p_formats, num_params * sizeof(short));
     }
     write_int2(&buf, (short)num_params);
     for (i = 0; i < num_params; i++) {
@@ -1236,22 +1272,18 @@ execute_message_params(
     buf++[0] = 'D';
     write_int4(&buf, describe_len);
     buf++[0] = 'P';
-    write_string(&buf, portal_name, portal_name_len);
+    write_string(&buf, portal_name, portal_name_len + 1);
 
-    // execute
+    // execute and sync
     buf++[0] = 'E';
     write_int4(&buf, execute_len);
-    write_string(&buf, portal_name, portal_name_len);
-    write_int4(&buf, 0);
-
-    // sync
-    buf[0] = 'S';
-    buf++;
-//    buf++[0] = 'S';
-    write_int4(&buf, 4);
+    write_string(&buf, portal_name, portal_name_len + 1);
+    write_string(&buf, "\0\0\0\0S\0\0\0\x04", 9);
 
 end:
     clean_param_info(param_info, num_params);
+    PyMem_Free(oids);
+    PyMem_Free(p_formats);
     return py_buf;
 }
 
