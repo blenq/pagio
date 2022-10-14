@@ -599,6 +599,7 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
 error:
     PyMem_Free(self->pg_converters);
     self->pg_converters = NULL;
+    self->num_cols = 0;
     Py_XDECREF(fields);
     Py_XDECREF(field_info);
     return -1;
@@ -704,6 +705,7 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
     if (self->pg_converters) {
         PyMem_Free(self->pg_converters);
         self->pg_converters = NULL;
+        self->num_cols = 0;
     }
 
     tag = read_string(buf, end);
