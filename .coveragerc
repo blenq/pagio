@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = pagio
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if sys\.version_info < \(3,
+    @abstractmethod
