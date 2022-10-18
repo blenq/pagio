@@ -15,6 +15,9 @@ NO_RESULT = object()
 class _PGProtocol:
     """ Synchronous Protocol """
 
+    _prepare_threshold: int
+    _cache_size: int
+
     def __init__(self, sock: socket.socket):
         super().__init__()
         self._sock = sock
@@ -29,12 +32,15 @@ class _PGProtocol:
             password: Union[None, str, bytes],
             *,
             tz_name: Optional[str],
+            prepare_threshold,
+            cache_size,
     ) -> None:
         """ Start up connection, including authentication """
 
         message = self._startup_message(
             user, database, application_name, tz_name, password)
-
+        self._prepare_threshold = prepare_threshold
+        self._cache_size = cache_size
         while isinstance(message, bytes):
             self.write(message)
             message = self.read()

@@ -1,5 +1,6 @@
 from abc import abstractmethod, ABC
 from codecs import decode
+from collections import OrderedDict
 import enum
 from hashlib import md5
 from struct import Struct, unpack_from, pack
@@ -179,8 +180,6 @@ class _BasePGProtocol:
         self._integer_datetimes = False
         self._tz_info: Optional[ZoneInfo] = None
         self._backend: Optional[Tuple[int, int]] = None
-        # self.res_fields: Optional[List[Dict[str, Any]]] = None
-        # self.res_rows: Optional[List[Tuple[Any, ...]]] = None
         self.password: Union[None, str, bytes] = None
         self.user: Union[None, str, bytes] = None
 
@@ -369,22 +368,39 @@ class _BasePGProtocol:
 class PyBasePGProtocol(_BasePGProtocol, ABC):
 
     def __init__(self) -> None:
+
+        # cache stuff
+        self._cache = OrderedDict()
+        self._cache_item = None
+        self._stmt_name = b''
+        self._close_stmt = None
+
+        # reading buffers and counters
         self._bytes_read = 0
         self._buf = self._standard_buf = memoryview(
             bytearray(STANDARD_BUF_SIZE))
         self._msg_len = 5
         self._identifier = None
+
+        # resultset vars
         self.res_rows = None
         self.res_fields = None
-        self._status = _STATUS_CLOSED
+        self.res_converters = None
+
+        # return values
         self._result: Any = None
         self._ex: Optional[ServerError] = None
+
+        # status vars
+        self._status = _STATUS_CLOSED
         self._transaction_status = 0
+
         super().__init__()
         self._handlers.update({
             ord(k): v for k, v in [
                 ('1', self.handle_parse_complete),
                 ('2', self.handle_bind_complete),
+                ('3', self.handle_close_complete),
                 ('T', self.handle_row_description),
                 ('D', self.handle_data_row),
                 ('C', self.handle_command_complete),
@@ -452,84 +468,143 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def convert_param(self, param: Any) -> Tuple[int, str, Any, int, Format]:
         return self.param_converters.get(type(param), default_to_pg)(param, 0)
 
+    def _close_statement_message(self, fmt, cargs, stmt_name):
+        name_len = len(stmt_name)
+        fmt.append(f"cic{name_len + 1}s")
+        cargs.extend([b"C", 6 + name_len, b'S', stmt_name])
+
     def execute_message(
             self,
             sql: str,
             parameters: Tuple[Any],
             result_format: Format,
     ) -> bytes:
-        # self.res_fields = None
-        # self.res_rows =
-        self._status = _STATUS_EXECUTING
-        self._result = ResultSet()
         sql_bytes = sql.encode()
         sql_len = len(sql_bytes)
-        if not parameters and result_format is Format.TEXT:
-            # Use simple query
-            return pack(f"!ci{sql_len + 1}s", b'Q', sql_len + 5, sql_bytes)
 
         if parameters:
             param_oids, param_structs, param_vals, param_lens, param_fmts = zip(
                 *(self.convert_param(p) for p in parameters))
-        else:
-            param_oids = param_structs = param_vals = param_fmts = param_lens = tuple()
+
         fmt = ["!"]
         cargs = []
         stmt_name = b''
-        stmt_name_len = len(stmt_name)
-        num_params = len(param_oids)
 
-        # Parse
-        fmt.append(
-            f"ci{stmt_name_len + 1}s{sql_len + 1}sH{num_params}I")
-        cargs.extend([
-            b"P", stmt_name_len + sql_len + 8 + num_params * 4,
-            stmt_name, sql_bytes, num_params])
-        cargs.extend(param_oids)
+        if self._close_stmt is not None:
+            self._close_statement_message(fmt, cargs, self._close_stmt)
+            self._close_stmt = None
 
-        # Bind
-        fmt.append(
-            f"cis{stmt_name_len + 1}s{num_params + 2}H"
-        )
-        bind_length = stmt_name_len + 14 + num_params * 6
+        should_parse = True
 
-        param_pg_vals = []
-        for param_val, param_struct, param_len in zip(
-                param_vals, param_structs, param_lens):
-            # Add param values, first length, then actual value
-            fmt.append("i")
-            if param_val is None:
-                # Special case for None (pg NULL)
-                param_pg_vals.append(-1)
-            else:
-                fmt.append(param_struct)
-                param_pg_vals.extend([param_len, param_val])
-                bind_length += param_len
-        cargs.extend([
-            b"B", bind_length, b'', stmt_name, num_params])
-        cargs.extend(param_fmts)
-        cargs.append(num_params)
-        cargs.extend(param_pg_vals)
+        if self._prepare_threshold:
+            cache_key = (sql, param_oids) if parameters else sql
+            cache_item = self._cache.get(cache_key)
+            if cache_item:
+                self._cache.move_to_end(cache_key)
+                if cache_item["prepared"]:
+                    if cache_item["error"]:
+                        cache_item["num_executed"] = 0
+                        cache_item["prepared"] = False
+                        cache_item["error"] = False
+                        error_stmt_name = cache_item["name"]
+                        self._close_statement_message(
+                            fmt, cargs, error_stmt_name)
+                    else:
+                        should_parse = False
+                        stmt_name = cache_item["name"]
+                else:
+                    if cache_item["num_executed"] == self._prepare_threshold:
+                        stmt_name = cache_item["name"]
 
-        # Bind trailer, Describe, Execute and Sync
-        fmt.append(
-            "HH"
-            "cics"
-            "cisi"
-            "ci")
-        cargs.extend([
-            1, result_format,
-            b"D", 6, b"P", b'',
-            b'E', 9, b'', 0,
-            b"S", 4])
+        if (not parameters and result_format is Format.TEXT and should_parse
+                and not stmt_name):
+            # Use simple query
+            fmt.append(f"ci{sql_len + 1}s")
+            cargs.extend([b'Q', sql_len + 5, sql_bytes])
+        else:
+            stmt_name_len = len(stmt_name)
+            num_params = len(parameters)
 
-        return pack("".join(fmt), *cargs)
+            if should_parse:
+                # Parse
+                fmt.append(
+                    f"ci{stmt_name_len + 1}s{sql_len + 1}sH{num_params}I")
+                cargs.extend([
+                    b"P", stmt_name_len + sql_len + 8 + num_params * 4,
+                    stmt_name, sql_bytes, num_params])
+                if num_params:
+                    cargs.extend(param_oids)
+
+            # Bind
+            fmt.append(
+                f"cis{stmt_name_len + 1}s{num_params + 2}H"
+            )
+            bind_length = stmt_name_len + 14 + num_params * 6
+
+            param_pg_vals = []
+            if parameters:
+                for param_val, param_struct, param_len in zip(
+                        param_vals, param_structs, param_lens):
+                    # Add param values, first length, then actual value
+                    fmt.append("i")
+                    if param_val is None:
+                        # Special case for None (pg NULL)
+                        param_pg_vals.append(-1)
+                    else:
+                        fmt.append(param_struct)
+                        param_pg_vals.extend([param_len, param_val])
+                        bind_length += param_len
+            cargs.extend([
+                b"B", bind_length, b'', stmt_name, num_params])
+            if parameters:
+                cargs.extend(param_fmts)
+            cargs.append(num_params)
+            cargs.extend(param_pg_vals)
+            fmt.append("HH")
+            cargs.extend([1, result_format])
+
+            # Describe
+            if should_parse:
+                fmt.append("cics")
+                cargs.extend([b"D", 6, b"P", b''])
+
+            # Execute and Sync
+            fmt.append("cisici")
+            cargs.extend([b'E', 9, b'', 0, b"S", 4])
+
+        # Construct message
+        message = pack("".join(fmt), *cargs)
+
+        # Set up for results
+        if self._prepare_threshold:
+            self.cache_key = cache_key
+            self._cache_item = cache_item
+            if not should_parse:
+                self.res_fields = cache_item["res_fields"]
+                self.res_converters = cache_item["res_converters"]
+                self.res_rows = None if self.res_fields is None else []
+        self._result = ResultSet()
+        self._stmt_name = stmt_name
+        self._status = _STATUS_EXECUTING
+
+        return message
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
+        if self._stmt_name:
+            self._cache_item["prepared"] = True
 
     def handle_bind_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
+
+    def handle_close_complete(self, msg_buf: memoryview) -> None:
+        check_length_equal(0, msg_buf)
+
+    def handle_nodata(self, msg_buf: memoryview) -> None:
+        check_length_equal(0, msg_buf)
+        self.res_fields = None
+        self.res_rows = None
+        self.res_converters = None
 
     def handle_row_description(self, msg_buf: memoryview) -> None:
         buffer = bytes(msg_buf)
@@ -589,21 +664,48 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             raise ProtocolError("Invalid command complete message")
         self._result._add_result(
             self.res_fields, self.res_rows, decode(msg_buf[:-1]))
-        self.res_fields = None
-        self.res_rows = None
 
     def handle_ready_for_query(self, msg_buf: memoryview) -> None:
         self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
+        if self._prepare_threshold:
+            cache_item = self._cache_item
+            if self._ex is not None:
+                if cache_item is not None and cache_item["prepared"]:
+                    cache_item["error"] = True
+            elif self._result and len(self._result._results) == 1:
+                if cache_item is None:
+                    cache_len = len(self._cache)
+                    if cache_len == self._cache_size:
+                        old_item = self._cache.popitem(last=False)[1]
+                        stmt_name = old_item["name"]
+                        if old_item["prepared"]:
+                            # add to close
+                            self._close_stmt = stmt_name
+                    else:
+                        stmt_name = f"_pagio_{cache_len:03}".encode()
+                    self._cache[self.cache_key] = {
+                        "prepared": False,
+                        "num_executed": 1,
+                        "name": stmt_name,
+                        "error": False,
+                        "res_fields": self.res_fields,
+                        "res_converters": self.res_converters,
+                    }
+                else:
+                    if not self._cache_item["prepared"]:
+                        self._cache_item["num_executed"] += 1
+
         if self._ex is not None:
             self._set_exception(self._ex)
-            self.res_fields = None
-            self.res_rows = None
             self._ex = None
         else:
             self._set_result()
         self._result = None
+        self.res_fields = None
+        self.res_rows = None
+        self._cache_item = None
 
 
 try:

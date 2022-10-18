@@ -43,6 +43,8 @@ class BaseConnection:
             ssl: Optional[SSLContext] = None,
             local_addr: Any = None,
             server_hostname: Optional[str] = None,
+            prepare_threshold: int = 5,
+            cache_size: int = 100,
             ) -> None:
         port = _from_env(port, "PORT")
         if port is None:
@@ -87,6 +89,14 @@ class BaseConnection:
         self._tz_name = tz_name
         self._local_addr = local_addr
         self._use_af_unix = use_af_unix
+        prepare_threshold = int(prepare_threshold)
+        if prepare_threshold < 0:
+            raise ValueError("Negative value for prepare_threshold.")
+        cache_size = int(cache_size)
+        if cache_size < 1:
+            raise ValueError("Invalid value for cache_size")
+        self._prepare_threshold = prepare_threshold
+        self._cache_size = cache_size
 
     @property
     def host(self) -> str:

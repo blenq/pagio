@@ -111,8 +111,8 @@ class ResultCase(unittest.TestCase):
 class PyResultCase(ResultCase):
     @classmethod
     def setUpClass(cls) -> None:
-        sync_connection._protocol_class = sync_protocol.PyPGProtocol
+        sync_connection.PGProtocol = sync_protocol.PyPGProtocol
 
     @classmethod
     def tearDownClass(cls) -> None:
-        sync_connection._protocol_class = sync_protocol.PGProtocol
+        sync_connection.PGProtocol = sync_protocol.PGProtocol

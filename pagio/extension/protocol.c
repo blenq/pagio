@@ -764,19 +764,6 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     return 0;
 }
 
-//    def handle_ready_for_query(self, msg_buf: memoryview) -> None:
-//        self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
-//        self._status = _STATUS_READY_FOR_QUERY
-//
-//        if self._ex is not None:
-//            self._set_exception(self._ex)
-//            self.res_fields = None
-//            self.res_rows = None
-//            self._ex = None
-//        else:
-//            self._set_result()
-//        self._result = None
-
 
 static int
 PPhandle_message(PPObject *self, char *buf) {

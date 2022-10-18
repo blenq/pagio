@@ -2,11 +2,12 @@ from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop)
 from typing import Optional, Any, Union, cast, Sequence
 
-from .base_protocol import BasePGProtocol, ProtocolStatus, Format
+from .base_protocol import (
+    BasePGProtocol, PyBasePGProtocol, ProtocolStatus, Format)
 from .common import ResultSet
 
 
-class AsyncPGProtocol(BasePGProtocol, BufferedProtocol):
+class _AsyncPGProtocol:
 
     _transport: Transport
 
@@ -45,9 +46,13 @@ class AsyncPGProtocol(BasePGProtocol, BufferedProtocol):
             application_name: Optional[str],
             tz_name: Optional[str],
             password: Union[None, str, bytes],
+            prepare_threshold: int,
+            cache_size: int,
     ) -> None:
         message = self._startup_message(
             user, database, application_name, tz_name, password)
+        self._prepare_threshold = prepare_threshold
+        self._cache_size = cache_size
 
         while isinstance(message, bytes):
             self._read_fut = self._loop.create_future()
@@ -82,3 +87,11 @@ class AsyncPGProtocol(BasePGProtocol, BufferedProtocol):
     def _set_result(self) -> None:
         if self._read_fut and not self._read_fut.done():
             self._read_fut.set_result(self._result)
+
+
+class AsyncPGProtocol(_AsyncPGProtocol, BasePGProtocol, BufferedProtocol):
+    pass
+
+
+class PyAsyncPGProtocol(_AsyncPGProtocol, PyBasePGProtocol, BufferedProtocol):
+    pass

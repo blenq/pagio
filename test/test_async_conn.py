@@ -5,7 +5,8 @@ except ImportError:
 
 
 from pagio import (
-    AsyncConnection, TransactionStatus, ProtocolStatus, ServerError, Format)
+    AsyncConnection, TransactionStatus, ProtocolStatus, ServerError, Format,
+    async_connection, async_protocol)
 
 
 class ConnCase(IsolatedAsyncioTestCase):
@@ -64,3 +65,93 @@ class ConnCase(IsolatedAsyncioTestCase):
             res = await cn.execute(
                 "SET TIMEZONE TO 'Europe/Paris'", result_format=Format.BINARY)
             self.assertIsNone(res.fields)
+
+    async def test_select_cache(self):
+        sql1 = "SELECT $1, $2"
+        sql2 = "SELECT $1 + 1, $2 + 1, $3"
+        async with await AsyncConnection(
+                database="postgres", prepare_threshold=4) as cn:
+            # execute up to threshold
+            for i in range(4):
+                res = await cn.execute(sql1, i, None)
+                self.assertEqual(res.rows[0], (i, None))
+                res = await cn.execute(sql2, i, None, 'hi')
+                self.assertEqual(res.rows[0], (i + 1, None, 'hi'))
+
+            # assert not prepared yet
+            res = await cn.execute(
+                "SELECT COUNT(*) FROM pg_prepared_statements "
+                "WHERE statement in ($1, $2)", sql1, sql2)
+            self.assertEqual(res[0][0], 0)
+
+            # execute both queries one more time
+            res = await cn.execute(sql1, i, None)
+            self.assertEqual(res.rows[0], (i, None))
+            res = await cn.execute(sql2, i, None, 'hi')
+            self.assertEqual(res.rows[0], (i + 1, None, 'hi'))
+
+            # assert prepared
+            res = await cn.execute(
+                "SELECT COUNT(*) FROM pg_prepared_statements "
+                "WHERE statement in ($1, $2)", sql1, sql2)
+            self.assertEqual(res[0][0], 2)
+
+            # execute both queries and assert those still work
+            res = await cn.execute(sql1, i, None)
+            self.assertEqual(res.rows[0], (i, None))
+            res = await cn.execute(sql2, i, None, 'hi')
+            self.assertEqual(res.rows[0], (i + 1, None, 'hi'))
+
+    async def test_max_cache(self):
+       async with await AsyncConnection(
+               database="postgres", prepare_threshold=1, cache_size=10
+       ) as cn:
+           await cn.execute("SELECT 1 AS val")
+           await cn.execute("SELECT 1 AS val")
+           res = await cn.execute("SELECT COUNT(*) FROM pg_prepared_statements")
+           self.assertEqual(res.rows[0][0], 1)
+           for i in range(10):
+               await cn.execute(f"SELECT {i}")
+           res = await cn.execute("SELECT COUNT(*) FROM pg_prepared_statements")
+           self.assertEqual(res.rows[0][0], 0)
+
+    async def test_cache_error(self):
+        async with await AsyncConnection(
+               database="postgres", prepare_threshold=1) as cn:
+            res = await cn.execute("SELECT 12 / $1 AS val", 2)
+            self.assertEqual(res.rows[0], (6,))
+            res = await cn.execute("SELECT 12 / $1 AS val", 3)
+            self.assertEqual(res.rows[0], (4,))
+
+            # executed twice, so should be prepared now
+            res = await cn.execute("SELECT COUNT(*) FROM pg_prepared_statements")
+            self.assertEqual(res.rows[0][0], 1)
+
+            with self.assertRaises(ServerError):
+                await cn.execute("SELECT 12 / $1 AS val", 0)
+
+            res = await cn.execute("SELECT 12 / $1 AS val", 4)
+            self.assertEqual(res.rows[0], (3,))
+
+            # error occurred, so should be cleared
+            res = await cn.execute(
+                "SELECT COUNT(*) as num1 FROM pg_prepared_statements")
+            self.assertEqual(res.rows[0][0], 0)
+
+            res = await cn.execute("SELECT 12 / $1 AS val", 3)
+            self.assertEqual(res.rows[0], (4,))
+
+            # executed twice, so should be prepared now
+            res = await cn.execute(
+                "SELECT COUNT(*) AS num2 FROM pg_prepared_statements")
+            self.assertEqual(res.rows[0][0], 1)
+
+
+class PyConnCase(ConnCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        async_connection.AsyncPGProtocol = async_protocol.PyAsyncPGProtocol
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        async_connection.AsyncPGProtocol = async_protocol.AsyncPGProtocol

@@ -26,10 +26,14 @@ class AsyncConnection(BaseConnection):
             ssl: Optional[SSLContext] = None,
             local_addr: Any = None,
             server_hostname: Optional[str] = None,
+            prepare_threshold: int = 5,
+            cache_size: int = 100,
     ) -> None:
         super().__init__(
             host, port, database, user, password, tz_name, ssl_mode=ssl_mode,
-            ssl=ssl, local_addr=local_addr, server_hostname=server_hostname)
+            ssl=ssl, local_addr=local_addr, server_hostname=server_hostname,
+            prepare_threshold=prepare_threshold, cache_size=cache_size,
+        )
 
     def __await__(self) -> Generator[Any, None, 'AsyncConnection']:
         return self._connect().__await__()
@@ -48,7 +52,8 @@ class AsyncConnection(BaseConnection):
         self._protocol = cn[1]
         await self._protocol.startup(
             self._user, self._database, "pagio", self._tz_name,
-            self._password)
+            self._password, prepare_threshold=self._prepare_threshold,
+            cache_size=self._cache_size)
         return self
 
     async def execute(
