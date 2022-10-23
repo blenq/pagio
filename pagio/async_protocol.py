@@ -3,7 +3,8 @@ from asyncio import (
 from typing import Optional, Any, Union, cast, Sequence, List
 
 from .base_protocol import (
-    BasePGProtocol, PyBasePGProtocol, ProtocolStatus, Format)
+    BasePGProtocol, PyBasePGProtocol, ProtocolStatus, Format,
+    TransactionStatus)
 from .common import ResultSet, CachedQueryExpired
 
 
@@ -85,7 +86,11 @@ class _AsyncPGProtocol:
         try:
             return await self._execute(sql, parameters, result_format)
         except CachedQueryExpired:
-            return await self._execute(sql, parameters, result_format)
+            # Cached statement is expired due to result types change.
+            if self.transaction_status == TransactionStatus.IDLE:
+                # Not in a transaction, so retry is possible
+                return await self._execute(sql, parameters, result_format)
+            raise
 
     async def close(self) -> None:
         if self._status == ProtocolStatus.READY_FOR_QUERY:

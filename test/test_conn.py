@@ -3,7 +3,7 @@ import sys
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
-    sync_connection, sync_protocol
+    sync_connection, sync_protocol, CachedQueryExpired
 )
 
 
@@ -161,9 +161,21 @@ class ConnCase(unittest.TestCase):
                 "DROP TABLE test_val;"
                 "CREATE TEMPORARY TABLE test_val (id serial, val text)")
 
-            # cached statement is not valid anymore
+            # cached statement is not valid anymore, connection should recover
+            # from error
             res = cn.execute("SELECT * FROM test_val")
             self.assertEqual(res.fields[1].type_oid, 25)
+
+            # do the same within transaction. Connection can not recover now
+            cn.execute("BEGIN;")
+            cn.execute("SELECT * FROM test_val")
+            # recreate table with different type
+            cn.execute(
+                "DROP TABLE test_val;"
+                "CREATE TEMPORARY TABLE test_val (id serial, val int)")
+            with self.assertRaises(CachedQueryExpired):
+                res = cn.execute("SELECT * FROM test_val")
+            cn.execute("ROLLBACK")
 
 
 class PyConnCase(ConnCase):

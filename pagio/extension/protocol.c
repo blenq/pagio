@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "field_info.h"
 #include "stmt.h"
 #include "numeric.h"
 #include "utils.h"
@@ -111,7 +112,6 @@ read_string(char **ptr, char *end) {
     return ret;
 }
 
-static PyTypeObject *FIType;
 
 #define STANDARD_BUF_SIZE 0x4000
 
@@ -264,7 +264,7 @@ read_field_info(char **buf, char *end, res_converter *converter)
     unsigned int type_oid;
     short type_fmt;
 
-    field_info = PyStructSequence_New(FIType);
+    field_info = PyStructSequence_New(PagioFieldInfo_Type);
     if (field_info == NULL) {
         return NULL;
     }
@@ -1398,7 +1398,6 @@ static PyMethodDef PP_methods[] = {
 
 
 static PyMemberDef PP_members[] = {
-//    {"_result", T_OBJECT_EX, offsetof(PPObject, result), 0, "result"},
     {"_status", T_INT, offsetof(PPObject, status), 0, "Protocol status"},
     {"_ex", T_OBJECT, offsetof(PPObject, ex), 0, "server error"},
     {"_transaction_status", T_UBYTE, offsetof(PPObject, transaction_status), 0,
@@ -1436,33 +1435,19 @@ static PyModuleDef PPModule = {
 };
 
 
-static PyStructSequence_Field FIFields[] = {
-    {"field_name", NULL},
-    {"table_oid", NULL},
-    {"col_num", NULL},
-    {"type_oid", NULL},
-    {"type_size", NULL},
-    {"type_mod", NULL},
-    {"format", NULL},
-    {NULL}
-};
-
-
-static PyStructSequence_Desc FIDesc = {
-    "FieldInfo",
-    "FieldInfo",
-    FIFields,
-    7
-};
-
 #if (defined(__GNUC__))
 #pragma GCC visibility pop
 #endif
+
 
 PyMODINIT_FUNC
 PyInit__pagio(void)
 {
     PyObject *m;
+
+    if (PagioFieldInfo_Init() == -1) {
+        return NULL;
+    }
 
     if (PyType_Ready(&PPType) < 0)
         return NULL;
@@ -1482,15 +1467,9 @@ PyInit__pagio(void)
         return NULL;
     }
 
-    FIType = PyStructSequence_NewType(&FIDesc);
-    if (FIType == NULL) {
-        Py_DECREF(&PPType);
-        Py_DECREF(m);
-        return NULL;
-    }
-    Py_INCREF(FIType);
-    if (PyModule_AddObject(m, "FieldInfo", (PyObject *) FIType) < 0) {
-        Py_DECREF(&FIType);
+    Py_INCREF(PagioFieldInfo_Type);
+    if (PyModule_AddObject(m, "FieldInfo", (PyObject *) PagioFieldInfo_Type) < 0) {
+        Py_DECREF(&PagioFieldInfo_Type);
         Py_DECREF(&PPType);
         Py_DECREF(m);
         return NULL;

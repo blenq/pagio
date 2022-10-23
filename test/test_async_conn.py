@@ -6,7 +6,7 @@ except ImportError:
 
 from pagio import (
     AsyncConnection, TransactionStatus, ProtocolStatus, ServerError, Format,
-    async_connection, async_protocol)
+    async_connection, async_protocol, CachedQueryExpired)
 
 
 class ConnCase(IsolatedAsyncioTestCase):
@@ -169,10 +169,20 @@ class ConnCase(IsolatedAsyncioTestCase):
                 "DROP TABLE test_val;"
                 "CREATE TEMPORARY TABLE test_val (id serial, val text)")
 
-            # cached statement is not valid anymore
+            # cached statement is not valid anymore, connection should recover
             res = await cn.execute("SELECT * FROM test_val")
             self.assertEqual(res.fields[1].type_oid, 25)
 
+            # do the same within transaction. Connection can not recover now
+            await cn.execute("BEGIN;")
+            await cn.execute("SELECT * FROM test_val")
+            # recreate table with different type
+            await cn.execute(
+                "DROP TABLE test_val;"
+                "CREATE TEMPORARY TABLE test_val (id serial, val int)")
+            with self.assertRaises(CachedQueryExpired):
+                res = await cn.execute("SELECT * FROM test_val")
+            await cn.execute("ROLLBACK")
 
 class PyConnCase(ConnCase):
     @classmethod

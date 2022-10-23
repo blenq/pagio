@@ -5,7 +5,7 @@ import sys
 from typing import Optional, Union, Any, cast, Sequence, List
 
 from .base_protocol import (
-    BasePGProtocol, ProtocolStatus, Format, PyBasePGProtocol)
+    BasePGProtocol, ProtocolStatus, Format, PyBasePGProtocol, TransactionStatus)
 from .common import ResultSet, CachedQueryExpired
 
 
@@ -95,7 +95,9 @@ class _PGProtocol:
         try:
             return self._execute(sql, parameters, result_format)
         except CachedQueryExpired:
-            return self._execute(sql, parameters, result_format)
+            if self.transaction_status == TransactionStatus.IDLE:
+                return self._execute(sql, parameters, result_format)
+            raise
 
     def close(self) -> None:
         """ Closes the connection """
