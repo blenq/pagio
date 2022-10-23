@@ -10,7 +10,7 @@ from typing import (
 
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
-    ResultSet, FieldInfo,
+    FieldInfo, CachedQueryExpired
 )
 from .const import *
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -81,6 +81,7 @@ class TransactionStatus(enum.Enum):
 
 
 class Format(enum.IntEnum):
+    DEFAULT = -1
     TEXT = 0
     BINARY = 1
 
@@ -89,7 +90,7 @@ _default_converters = [decode, bytes]
 
 
 def none_to_pg(val: None, oid: int) -> Tuple[int, str, None, int, Format]:
-    return oid, "", None, 0, Format.TEXT
+    return oid, "", None, -1, Format.TEXT
 
 
 def str_to_pg(val: Any, oid: int) -> Tuple[int, str, bytes, int, Format]:
@@ -289,7 +290,13 @@ class _BasePGProtocol:
             raise ProtocolError("Missing code in Error Response")
         if ex_args[2] is None:
             raise ProtocolError("Missing message in Error Response")
-        ex = ServerError(*ex_args)
+
+        if ex_args[16] == "RevalidateCachedQuery":
+            # recognize this particular error, to easily handle retry
+            ex_class = CachedQueryExpired
+        else:
+            ex_class = ServerError
+        ex = ex_class(*ex_args)
 
         if severity == Severity.FATAL or severity == Severity.PANIC:
             self._close()
@@ -372,8 +379,10 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         # cache stuff
         self._cache = OrderedDict()
         self._cache_item = None
-        self._stmt_name = b''
         self._close_stmt = None
+        self._prepare_threshold = 5
+        self._cache_size = 100
+        self.cache_key = None
 
         # reading buffers and counters
         self._bytes_read = 0
@@ -468,10 +477,58 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def convert_param(self, param: Any) -> Tuple[int, str, Any, int, Format]:
         return self.param_converters.get(type(param), default_to_pg)(param, 0)
 
-    def _close_statement_message(self, fmt, cargs, stmt_name):
+    def _append_close_statement_msg(self, message: List[bytes], stmt_name):
         name_len = len(stmt_name)
-        fmt.append(f"cic{name_len + 1}s")
-        cargs.extend([b"C", 6 + name_len, b'S', stmt_name])
+        message.append(pack(
+            f"!cic{name_len + 1}s", b"C", 6 + name_len, b'S', stmt_name))
+
+    def _simple_query_msg(self, sql):
+        sql_bytes = sql.encode()
+        sql_len = len(sql_bytes)
+        return pack(f"!ci{sql_len + 1}s", b'Q', sql_len + 5, sql_bytes)
+
+    def _parse_msg(
+            self, sql: str, stmt_name: bytes, param_oids: Tuple[int, ...]):
+        sql_bytes = sql.encode()
+        sql_len = len(sql_bytes)
+        stmt_name_len = len(stmt_name)
+        num_params = len(param_oids)
+
+        return pack(
+            f"!ci{stmt_name_len + 1}s{sql_len + 1}sH{num_params}I",
+            b"P", stmt_name_len + sql_len + 8 + num_params * 4,
+            stmt_name, sql_bytes, num_params, *param_oids)
+
+    def _bind_msg(
+            self, stmt_name, param_vals, param_structs, param_lens, param_fmts,
+            result_format):
+
+        if result_format == Format.DEFAULT:
+            result_format = Format.BINARY
+        stmt_name_len = len(stmt_name)
+        num_params = len(param_fmts)
+        bind_length = stmt_name_len + 14 + num_params * 6
+
+        param_pg_vals = []
+        param_pg_fmts = []
+        if num_params:
+            for param_val, param_struct, param_len in zip(
+                    param_vals, param_structs, param_lens):
+                # Add param values, first length, then actual value
+                param_pg_fmts.append("i")
+                param_pg_vals.append(param_len)
+                if param_len == -1:
+                    # NULL
+                    continue
+                param_pg_fmts.append(param_struct)
+                param_pg_vals.append(param_val)
+                bind_length += param_len
+
+        return pack(
+            f"!cis{stmt_name_len + 1}s{num_params + 2}H"
+            f"{''.join(param_pg_fmts)}HH",
+            b"B", bind_length, b'', stmt_name, num_params,
+            *param_fmts, num_params, *param_pg_vals, 1, result_format)
 
     def execute_message(
             self,
@@ -479,119 +536,84 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             parameters: Tuple[Any],
             result_format: Format,
     ) -> bytes:
-        sql_bytes = sql.encode()
-        sql_len = len(sql_bytes)
+        message = []
 
         if parameters:
             param_oids, param_structs, param_vals, param_lens, param_fmts = zip(
                 *(self.convert_param(p) for p in parameters))
+        else:
+            param_structs = param_vals = param_lens = param_fmts = param_oids = ()
 
-        fmt = ["!"]
-        cargs = []
         stmt_name = b''
 
         if self._close_stmt is not None:
-            self._close_statement_message(fmt, cargs, self._close_stmt)
-            self._close_stmt = None
+            self._append_close_statement_msg(message, self._close_stmt)
 
-        should_parse = True
+        prepared = False
 
         if self._prepare_threshold:
             cache_key = (sql, param_oids) if parameters else sql
             cache_item = self._cache.get(cache_key)
             if cache_item:
+                # statement executed before, move to end of cache
                 self._cache.move_to_end(cache_key)
                 if cache_item["prepared"]:
+                    # statement is prepared server side
                     if cache_item["error"]:
-                        cache_item["num_executed"] = 0
-                        cache_item["prepared"] = False
-                        cache_item["error"] = False
-                        error_stmt_name = cache_item["name"]
-                        self._close_statement_message(
-                            fmt, cargs, error_stmt_name)
+                        # Previous execution resulted in an error. Close
+                        # the statement server side.
+                        self._append_close_statement_msg(
+                            message, cache_item["name"])
                     else:
-                        should_parse = False
+                        # Reuse server side statement and skip parsing
+                        prepared = True
                         stmt_name = cache_item["name"]
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
                         stmt_name = cache_item["name"]
 
-        if (not parameters and result_format is Format.TEXT and should_parse
+        if (not parameters
+                and result_format in (Format.TEXT, Format.DEFAULT)
+                and not prepared
                 and not stmt_name):
             # Use simple query
-            fmt.append(f"ci{sql_len + 1}s")
-            cargs.extend([b'Q', sql_len + 5, sql_bytes])
+            message.append(self._simple_query_msg(sql))
         else:
-            stmt_name_len = len(stmt_name)
-            num_params = len(parameters)
-
-            if should_parse:
+            if not prepared:
                 # Parse
-                fmt.append(
-                    f"ci{stmt_name_len + 1}s{sql_len + 1}sH{num_params}I")
-                cargs.extend([
-                    b"P", stmt_name_len + sql_len + 8 + num_params * 4,
-                    stmt_name, sql_bytes, num_params])
-                if num_params:
-                    cargs.extend(param_oids)
+                message.append(self._parse_msg(sql, stmt_name, param_oids))
 
             # Bind
-            fmt.append(
-                f"cis{stmt_name_len + 1}s{num_params + 2}H"
-            )
-            bind_length = stmt_name_len + 14 + num_params * 6
+            message.append(self._bind_msg(
+                stmt_name, param_vals, param_structs, param_lens, param_fmts,
+                result_format))
 
-            param_pg_vals = []
-            if parameters:
-                for param_val, param_struct, param_len in zip(
-                        param_vals, param_structs, param_lens):
-                    # Add param values, first length, then actual value
-                    fmt.append("i")
-                    if param_val is None:
-                        # Special case for None (pg NULL)
-                        param_pg_vals.append(-1)
-                    else:
-                        fmt.append(param_struct)
-                        param_pg_vals.extend([param_len, param_val])
-                        bind_length += param_len
-            cargs.extend([
-                b"B", bind_length, b'', stmt_name, num_params])
-            if parameters:
-                cargs.extend(param_fmts)
-            cargs.append(num_params)
-            cargs.extend(param_pg_vals)
-            fmt.append("HH")
-            cargs.extend([1, result_format])
-
-            # Describe
-            if should_parse:
-                fmt.append("cics")
-                cargs.extend([b"D", 6, b"P", b''])
+            if not prepared:
+                # Describe
+                message.append(b'D\x00\x00\x00\x06P\x00')
 
             # Execute and Sync
-            fmt.append("cisici")
-            cargs.extend([b'E', 9, b'', 0, b"S", 4])
-
-        # Construct message
-        message = pack("".join(fmt), *cargs)
+            message.append(
+                b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
 
         # Set up for results
         if self._prepare_threshold:
             self.cache_key = cache_key
             self._cache_item = cache_item
-            if not should_parse:
+            if prepared:
+                # initialize result from cache
                 self.res_fields = cache_item["res_fields"]
                 self.res_converters = cache_item["res_converters"]
                 self.res_rows = None if self.res_fields is None else []
-        self._result = ResultSet()
-        self._stmt_name = stmt_name
+        self._result = []
         self._status = _STATUS_EXECUTING
 
         return message
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
-        if self._stmt_name:
+        if (self._cache_item is not None and
+                self._cache_item["num_executed"] == self._prepare_threshold):
             self._cache_item["prepared"] = True
 
     def handle_bind_complete(self, msg_buf: memoryview) -> None:
@@ -599,12 +621,16 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
 
     def handle_close_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
+        if self._close_stmt:
+            # An earlier statement was evicted from the cache
+            self._close_stmt = None
+        elif self._cache_item is not None and self._cache_item["error"]:
+            # Reset a statement that had state error
+            self._cache_item.update(
+                num_executed=0, prepared=False, error=False)
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
-        self.res_fields = None
-        self.res_rows = None
-        self.res_converters = None
 
     def handle_row_description(self, msg_buf: memoryview) -> None:
         buffer = bytes(msg_buf)
@@ -633,6 +659,9 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         self.res_fields = res_fields
         self.res_rows = []
         self.res_converters = converters
+        if self._cache_item is not None and self._cache_item["prepared"]:
+            self._cache_item.update(
+                res_fields=res_fields, res_converters=converters)
 
     def handle_data_row(self, buf: memoryview) -> None:
         value_converters = self.res_converters
@@ -662,40 +691,54 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def handle_command_complete(self, msg_buf: memoryview) -> None:
         if msg_buf[-1] != 0:
             raise ProtocolError("Invalid command complete message")
-        self._result._add_result(
-            self.res_fields, self.res_rows, decode(msg_buf[:-1]))
+        self._result.append((
+            self.res_fields, self.res_rows, decode(msg_buf[:-1])))
+        self.res_fields = None
+        self.res_converters = None
+        self.res_rows = None
 
     def handle_ready_for_query(self, msg_buf: memoryview) -> None:
         self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
         if self._prepare_threshold:
+            # caching
             cache_item = self._cache_item
             if self._ex is not None:
                 if cache_item is not None and cache_item["prepared"]:
+                    # Error occurred. Mark item as error and remove cached
+                    # attributes
                     cache_item["error"] = True
-            elif self._result and len(self._result._results) == 1:
+                    del cache_item["res_fields"]
+                    del cache_item["res_converters"]
+            elif self._result and len(self._result) == 1:
                 if cache_item is None:
+                    # Succesful execution for new statement
                     cache_len = len(self._cache)
                     if cache_len == self._cache_size:
+                        # Cache is full. Remove old statement, reuse statement
+                        # name and mark statement name for closure
                         old_item = self._cache.popitem(last=False)[1]
                         stmt_name = old_item["name"]
                         if old_item["prepared"]:
-                            # add to close
+                            # Mark for closure
                             self._close_stmt = stmt_name
                     else:
+                        # Create new statement name
                         stmt_name = f"_pagio_{cache_len:03}".encode()
+                    # Add cache item for statement
                     self._cache[self.cache_key] = {
                         "prepared": False,
                         "num_executed": 1,
                         "name": stmt_name,
                         "error": False,
-                        "res_fields": self.res_fields,
-                        "res_converters": self.res_converters,
                     }
-                else:
-                    if not self._cache_item["prepared"]:
-                        self._cache_item["num_executed"] += 1
+                elif not cache_item["prepared"]:
+                    # Succesful execution for existing statement. Update
+                    # execution counter.
+                    cache_item["num_executed"] += 1
+            self._cache_item = None
+            self.cache_key = None
 
         if self._ex is not None:
             self._set_exception(self._ex)
@@ -703,9 +746,6 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         else:
             self._set_result()
         self._result = None
-        self.res_fields = None
-        self.res_rows = None
-        self._cache_item = None
 
 
 try:

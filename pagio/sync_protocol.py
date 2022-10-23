@@ -2,11 +2,11 @@
 
 import socket
 import sys
-from typing import Optional, Union, Any, cast, Sequence
+from typing import Optional, Union, Any, cast, Sequence, List
 
 from .base_protocol import (
     BasePGProtocol, ProtocolStatus, Format, PyBasePGProtocol)
-from .common import ResultSet
+from .common import ResultSet, CachedQueryExpired
 
 
 NO_RESULT = object()
@@ -47,14 +47,11 @@ class _PGProtocol:
 
     def write(self, data: bytes) -> None:
         """ Send data to the server """
-        mem = memoryview(data)
-        total_sent = 0
-        data_len = len(data)
-        while total_sent < data_len:
-            sent = self._sock.send(mem[total_sent:])
-            if sent == 0:
-                raise RuntimeError("socket connection broken")
-            total_sent += sent
+        self._sock.sendall(data)
+
+    def writelines(self, data: List[bytes]) -> None:
+        for chunk in data:
+            self.write(chunk)
 
     def read(self) -> Any:
         """ Read data from server and handle returned data """
@@ -77,6 +74,17 @@ class _PGProtocol:
             raise ret
         return ret
 
+    def _execute(
+            self,
+            sql: str,
+            parameters: Optional[Sequence[Any]],
+            result_format: Format,
+    ) -> ResultSet:
+        """ Execute a query text and return the result """
+        self.writelines(
+            self.execute_message(sql, parameters, result_format=result_format))
+        return ResultSet(self.read())
+
     def execute(
             self,
             sql: str,
@@ -84,11 +92,10 @@ class _PGProtocol:
             result_format: Format,
     ) -> ResultSet:
         """ Execute a query text and return the result """
-        # msg = self.execute_message(
-        #     sql, parameters, result_format=result_format)
-        self.write(self.execute_message(
-            sql, parameters, result_format=result_format))
-        return cast(ResultSet, self.read())
+        try:
+            return self._execute(sql, parameters, result_format)
+        except CachedQueryExpired:
+            return self._execute(sql, parameters, result_format)
 
     def close(self) -> None:
         """ Closes the connection """

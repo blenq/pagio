@@ -130,6 +130,10 @@ class ServerError(Error):
         return str(self.args[:3])
 
 
+class CachedQueryExpired(ServerError):
+    pass
+
+
 FieldInfo = namedtuple(
     "FieldInfo",
     ["field_name", "table_oid", "col_num", "type_oid", "type_size", "type_mod",
@@ -150,17 +154,10 @@ class Result:
 
 class ResultSet:
 
-    def __init__(self) -> None:
-        self._results: List[Result] = []
+    def __init__(self, results) -> None:
+        self._results: List[Result] = [
+            Result(*res_args) for res_args in results]
         self._result_index = 0
-
-    def _add_result(
-            self,
-            fields: Optional[List[FieldInfo]],
-            rows: Optional[List[Tuple[Any, ...]]],
-            command_tag: str,
-    ) -> None:
-        self._results.append(Result(fields, rows, command_tag))
 
     def _current(self) -> Result:
         return self._results[self._result_index]

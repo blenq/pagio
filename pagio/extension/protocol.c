@@ -1,42 +1,11 @@
-#include "pagio.h"
-#include "endian.h"
-#include "structmember.h"
-
-#define BOOLOID 16
-
-#define FLOAT4OID 700
-#define FLOAT8OID 701
-
-#define CHAROID 18
-#define NAMEOID 19
-#define TEXTOID 25
-#define BPCHAROID 1042
-#define VARCHAROID 1043
-
-
-
-#define INT2OID 21
-#define INT4OID 23
-#define INT8OID 20
-
-#define OIDOID 26
+#include "protocol.h"
+#include "stmt.h"
+#include "numeric.h"
+#include "utils.h"
 
 #define _STATUS_CLOSED 0
 #define _STATUS_READY_FOR_QUERY 5
 #define _STATUS_EXECUTING 6
-
-
-static uint16_t unpack_uint2(char *ptr) {
-    uint16_t ret;
-
-    memcpy(&ret, ptr, 2);
-    return be16toh(ret);
-}
-
-
-static inline int16_t unpack_int2(char *ptr) {
-    return (int16_t) unpack_uint2(ptr);
-}
 
 
 static void pack_uint2(char *ptr, uint16_t val) {
@@ -79,14 +48,6 @@ read_int_from_short(char **ptr, char *end) {
 }
 
 
-static uint32_t unpack_uint4(char *ptr) {
-    int ret;
-
-    memcpy(&ret, ptr, 4);
-    return be32toh(ret);
-}
-
-
 static void pack_uint4(char *ptr, uint32_t val) {
     uint32_t nval;
     nval = htobe32(val);
@@ -120,11 +81,6 @@ read_int_from_uint(char **ptr, char *end) {
 }
 
 
-static inline int32_t unpack_int4(char *ptr) {
-    return (int32_t) unpack_uint4(ptr);
-}
-
-
 static inline int read_int(char **ptr, char *end, int32_t *val) {
     return read_uint(ptr, end, (uint32_t *)val);
 }
@@ -137,19 +93,6 @@ read_int_from_int(char **ptr, char *end) {
         return NULL;
     }
     return PyLong_FromLong(val);
-}
-
-
-static uint64_t unpack_uint8(char *ptr) {
-    uint64_t ret;
-
-    memcpy(&ret, ptr, 8);
-    return be64toh(ret);
-}
-
-
-static inline int64_t unpack_int8(char *ptr) {
-    return (int64_t) unpack_uint8(ptr);
 }
 
 
@@ -169,29 +112,6 @@ read_string(char **ptr, char *end) {
 }
 
 static PyTypeObject *FIType;
-static PyObject *ResultSetType;
-
-typedef struct _PPobject PPObject;
-
-typedef PyObject *(*pg_converter)(PPObject *, char *, int);
-
-typedef struct _PPobject {
-    PyObject_HEAD
-    int bytes_read;
-    int msg_len;
-    int status;
-    unsigned short num_cols;
-    char identifier;
-    char transaction_status;
-    char *buf_ptr;
-    char *standard_buf_ptr;
-    PyObject *buf;
-    PyObject *res_rows;
-    PyObject *res_fields;
-    PyObject *result;
-    PyObject *ex;
-    pg_converter *pg_converters;
-} PPObject;
 
 #define STANDARD_BUF_SIZE 0x4000
 
@@ -211,14 +131,18 @@ PP_dealloc(PPObject *self)
     Py_CLEAR(self->res_fields);
     Py_CLEAR(self->result);
     Py_CLEAR(self->ex);
+    Py_CLEAR(self->cache_key);
+    if (self->res_converters) {
+        if (!self->cache_item || !self->cache_item->prepared) {
+            PyMem_Free(self->res_converters);
+        }
+    }
+    Py_CLEAR(self->cache_item);
+    Py_CLEAR(self->stmt_cache);
     if (self->buf_ptr != self->standard_buf_ptr) {
         PyMem_Free(self->buf_ptr);
     }
     PyMem_Free(self->standard_buf_ptr);
-    if (self->pg_converters) {
-        PyMem_Free(self->pg_converters);
-        self->pg_converters = NULL;
-    }
     Py_TYPE(self)->tp_free((PyObject *) self);
 }
 
@@ -247,6 +171,11 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF(self);
         return NULL;
     }
+    self->stmt_cache = PyDict_New();
+    if (self->stmt_cache == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
     Py_INCREF(Py_None);
     self->result = Py_None;
     self->status = _STATUS_CLOSED;
@@ -268,67 +197,13 @@ PPget_buffer(PPObject *self, PyObject *arg)
 }
 
 
-PyObject *
+static PyObject *
 convert_pg_text(PPObject *self, char *buf, int len) {
     return PyUnicode_FromStringAndSize(buf, len);
 }
 
-PyObject *
-convert_pg_bool_text(PPObject *self, char *buf, int len) {
-    if (len != 1) {
-        goto error;
-    }
-    if (buf[0] == 't') {
-        Py_RETURN_TRUE;
-    }
-    if (buf[0] == 'f') {
-        Py_RETURN_FALSE;
-    }
-error:
-    PyErr_SetString(PyExc_ValueError, "Invalid pg bool text value.");
-    return NULL;
-}
 
-
-PyObject *
-convert_pg_float_text(PPObject *self, char *buf, int len) {
-    char data[len + 1];
-    double val;
-	char *pend;
-
-    memcpy(data, buf, len);
-    data[len] = 0;
-	val = PyOS_string_to_double(data, &pend, PyExc_ValueError);
-	if (val == -1.0 && PyErr_Occurred())
-		return NULL;
-	if (pend != data + len) {
-		PyErr_SetString(PyExc_ValueError, "Invalid floating point value");
-		return NULL;
-	}
-	return PyFloat_FromDouble(val);
-}
-
-PyObject *
-convert_pg_int_text(PPObject *self, char *buf, int len) {
-    char data[len + 1];
-    PyObject *val;
-	char *pend;
-
-    memcpy(data, buf, len);
-    data[len] = 0;
-    val = PyLong_FromString(data, &pend, 10);
-	if (val == NULL)
-		return NULL;
-	if (pend != data + len) {
-	    Py_DECREF(val);
-		PyErr_SetString(PyExc_ValueError, "Invalid integer value");
-		return NULL;
-	}
-	return val;
-}
-
-
-static pg_converter
+static res_converter
 get_text_converter(unsigned int type_oid)
 {
     switch(type_oid) {
@@ -348,106 +223,13 @@ get_text_converter(unsigned int type_oid)
 }
 
 
-PyObject *
-convert_pg_bool_bin(PPObject *self, char *buf, int len) {
-    if (len != 1) {
-        goto error;
-    }
-    if (buf[0] == 1) {
-        Py_RETURN_TRUE;
-    }
-    if (buf[0] == 0) {
-        Py_RETURN_FALSE;
-    }
-error:
-    PyErr_SetString(PyExc_ValueError, "Invalid pg bool binary value.");
-    return NULL;
-}
-
-
-static PyObject *
-convert_pg_float4_bin(PPObject *self, char *buf, int len)
-{
-	double val;
-
-	if (len != 4) {
-        PyErr_SetString(PyExc_ValueError, "Invalid float4 value");
-        return NULL;
-	}
-
-	val = _PyFloat_Unpack4((unsigned char *)buf, 0);
-    if (val == -1.0 && PyErr_Occurred()) {
-        return NULL;
-    }
-	return PyFloat_FromDouble(val);
-}
-
-
-static PyObject *
-convert_pg_float8_bin(PPObject *self, char *buf, int len)
-{
-	double val;
-
-	if (len != 8) {
-        PyErr_SetString(PyExc_ValueError, "Invalid float8 value");
-        return NULL;
-	}
-
-	val = _PyFloat_Unpack8((unsigned char *)buf, 0);
-    if (val == -1.0 && PyErr_Occurred()) {
-        return NULL;
-    }
-	return PyFloat_FromDouble(val);
-}
-
-
 static PyObject *
 convert_pg_binary(PPObject *self, char *buf, int len) {
     return PyBytes_FromStringAndSize(buf, len);
 }
 
 
-static PyObject *
-convert_pg_int2_bin(PPObject *self, char *buf, int len) {
-    if (len != 2) {
-        PyErr_SetString(PyExc_ValueError, "Invalid int2 value");
-        return NULL;
-    }
-    return PyLong_FromLong(unpack_int2(buf));
-}
-
-
-static PyObject *
-convert_pg_int4_bin(PPObject *self, char *buf, int len) {
-    if (len != 4) {
-        PyErr_SetString(PyExc_ValueError, "Invalid int4 value");
-        return NULL;
-    }
-    return PyLong_FromLong(unpack_int4(buf));
-}
-
-
-static PyObject *
-convert_pg_uint4_bin(PPObject *self, char *buf, int len) {
-    if (len != 4) {
-        PyErr_SetString(PyExc_ValueError, "Invalid uint4 value");
-        return NULL;
-    }
-    return PyLong_FromUnsignedLong(unpack_uint4(buf));
-}
-
-
-static PyObject *
-convert_pg_int8_bin(PPObject *self, char *buf, int len) {
-    if (len != 8) {
-        PyErr_SetString(PyExc_ValueError, "Invalid int2 value");
-        return NULL;
-    }
-    return PyLong_FromLongLong(unpack_int8(buf));
-}
-
-
-static pg_converter
+static res_converter
 get_binary_converter(unsigned int type_oid)
 {
     switch(type_oid) {
@@ -477,131 +259,147 @@ get_binary_converter(unsigned int type_oid)
 }
 
 
+static PyObject *
+read_field_info(char **buf, char *end, res_converter *converter)
+{
+    PyObject *field_info = NULL, *info_val;
+    unsigned int type_oid;
+    short type_fmt;
+
+    field_info = PyStructSequence_New(FIType);
+    if (field_info == NULL) {
+        return NULL;
+    }
+
+    // colname
+    info_val = read_string(buf, end);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 0, info_val);
+
+    // table oid
+    info_val = read_int_from_uint(buf, end);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 1, info_val);
+
+    // col number
+    info_val = read_int_from_short(buf, end);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 2, info_val);
+
+    // type oid
+    if (read_uint(buf, end, &type_oid) == -1) {
+        goto error;
+    }
+    info_val = PyLong_FromUnsignedLong(type_oid);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 3, info_val);
+
+    // type_size
+    info_val = read_int_from_short(buf, end);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 4, info_val);
+
+    // type_mod
+    info_val = read_int_from_int(buf, end);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 5, info_val);
+
+    // format
+    if (read_short(buf, end, &type_fmt) == -1) {
+        goto error;
+    }
+    info_val = PyLong_FromLong(type_fmt);
+    if (info_val == NULL) {
+        goto error;
+    }
+    PyStructSequence_SET_ITEM(field_info, 6, info_val);
+
+    if (type_fmt == 0) {
+        *converter = get_text_converter(type_oid);
+    }
+    else if (type_fmt == 1) {
+        *converter = get_binary_converter(type_oid);
+    }
+    else {
+        PyErr_SetString(PyExc_ValueError, "Invalid format value.");
+        goto error;
+    }
+    return field_info;
+error:
+    Py_DECREF(field_info);
+    return NULL;
+}
+
+
 static int
 PPhandle_rowdescription(PPObject *self, char **buf, char *end)
 {
     unsigned short num_cols;
     int i;
-    PyObject *field_info=NULL, *fields = NULL;
+    PyObject *res_fields = NULL, *res_rows = NULL;
 
-    if (self->pg_converters) {
-        PyMem_Free(self->pg_converters);
-        self->pg_converters = NULL;
+    if (self->res_converters || self->res_rows || self->res_fields) {
+        PyErr_SetString(PyExc_ValueError, "Unexpected row description.");
     }
-    Py_CLEAR(self->res_rows);
-    Py_CLEAR(self->res_fields);
 
     if (read_ushort(buf, end, &num_cols) == -1) {
         return -1;
     }
-    self->num_cols = num_cols;
-    self->pg_converters = PyMem_Malloc(num_cols * sizeof(pg_converter));
-    if (self->pg_converters == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
 
-    fields = PyList_New(num_cols);
-    if (fields == NULL) {
+    res_fields = PyList_New(num_cols);
+    if (res_fields == NULL) {
         goto error;
     }
 
+    self->res_converters = PyMem_Calloc(num_cols, sizeof(res_converter));
+    if (self->res_converters == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
     for (i = 0; i < num_cols; i++) {
-        PyObject *info;
-        unsigned int type_oid;
-        short type_fmt;
-        pg_converter converter;
+        PyObject *field_info;
 
-        field_info = PyStructSequence_New(FIType);
+        field_info = read_field_info(buf, end, self->res_converters + i);
         if (field_info == NULL) {
             goto error;
         }
-
-        // colname
-        info = read_string(buf, end);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 0, info);
-
-        // table oid
-        info = read_int_from_uint(buf, end);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 1, info);
-
-        // col number
-        info = read_int_from_short(buf, end);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 2, info);
-
-        // type oid
-        if (read_uint(buf, end, &type_oid) == -1) {
-            goto error;
-        }
-        info = PyLong_FromUnsignedLong(type_oid);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 3, info);
-
-        // type_size
-        info = read_int_from_short(buf, end);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 4, info);
-
-        // type_mod
-        info = read_int_from_int(buf, end);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 5, info);
-
-        // format
-        if (read_short(buf, end, &type_fmt) == -1) {
-            goto error;
-        }
-        info = PyLong_FromLong(type_fmt);
-        if (info == NULL) {
-            goto error;
-        }
-        PyStructSequence_SET_ITEM(field_info, 6, info);
-        if (type_fmt == 0) {
-            converter = get_text_converter(type_oid);
-        }
-        else if (type_fmt == 1) {
-            converter = get_binary_converter(type_oid);
-        }
-        else {
-            PyErr_SetString(PyExc_ValueError, "Invalid format value.");
-            goto error;
-        }
-
-        self->pg_converters[i] = converter;
-        PyList_SET_ITEM(fields, i, field_info);
-        field_info = NULL;
+        PyList_SET_ITEM(res_fields, i, field_info);
     }
+
     if (*buf != end) {
         PyErr_SetString(PyExc_ValueError, "Invalid row description.");
         goto error;
     }
-    self->res_rows = PyList_New(0);
-    if (self->res_rows == NULL) {
+    res_rows = PyList_New(0);
+    if (res_rows == NULL) {
         goto error;
     }
-    self->res_fields = fields;
+    self->res_rows = res_rows;
+    self->res_fields = res_fields;
+    if (self->cache_item && self->cache_item->prepared) {
+        Py_INCREF(res_fields);
+        self->cache_item->res_fields = res_fields;
+        self->cache_item->res_converters = self->res_converters;
+    }
+
     return 0;
 error:
-    PyMem_Free(self->pg_converters);
-    self->pg_converters = NULL;
-    self->num_cols = 0;
-    Py_XDECREF(fields);
-    Py_XDECREF(field_info);
+    PyMem_Free(self->res_converters);
+    self->res_converters = NULL;
+    Py_XDECREF(res_fields);
+    Py_XDECREF(res_rows);
     return -1;
 }
 
@@ -636,7 +434,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     if (read_ushort(buf, end, &num_cols) == -1) {
         return -1;
     }
-    if (num_cols != self->num_cols) {
+    if (num_cols != PyList_GET_SIZE(self->res_fields)) {
         PyErr_SetString(PyExc_ValueError, "Invalid number of values.");
         return -1;
     }
@@ -660,7 +458,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
                 PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
                 return -1;
             }
-            obj = self->pg_converters[i](self, *buf, val_len);
+            obj = self->res_converters[i](self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
             }
@@ -676,10 +474,32 @@ end:
 
 
 static int
+PPhandle_close_complete(PPObject *self, char **buf, char *end) {
+    if (*buf != end) {
+        PyErr_SetString(PyExc_ValueError, "Invalid close complete message.");
+        return -1;
+    }
+    if (self->stmt_to_close) {
+        self->stmt_to_close = 0;
+    }
+    else if (self->cache_item && self->cache_item->error) {
+        self->cache_item->num_executed = 0;
+        self->cache_item->prepared = 0;
+        self->cache_item->error = 0;
+    }
+    return 0;
+}
+
+
+static int
 PPhandle_parse_complete(PPObject *self, char **buf, char *end) {
     if (*buf != end) {
         PyErr_SetString(PyExc_ValueError, "Invalid parse complete message.");
         return -1;
+    }
+    if (self->cache_item &&
+            self->cache_item->num_executed == self->prepare_threshold) {
+        self->cache_item->prepared = 1;
     }
     return 0;
 }
@@ -695,40 +515,50 @@ PPhandle_bind_complete(PPObject *self, char **buf, char *end) {
 }
 
 
-PyObject *add_result;
-
 static int
 PPhandle_command_complete(PPObject *self, char **buf, char *end) {
-    PyObject *tag = NULL, *result = NULL, *py_ret = NULL;
-    int ret = -1;
+    PyObject *tag = NULL, *result_set = NULL, *item;
 
-    if (self->pg_converters) {
-        PyMem_Free(self->pg_converters);
-        self->pg_converters = NULL;
-        self->num_cols = 0;
+    if (self->res_converters) {
+        if (!self->cache_item || !self->cache_item->prepared) {
+            // if the statement is prepared, the converters are owned by the
+            // cache item
+            PyMem_Free(self->res_converters);
+        }
+        self->res_converters = NULL;
     }
+
+    result_set = PyTuple_New(3);
+    if (result_set == NULL) {
+        return -1;
+    }
+
+    item = self->res_fields ? self->res_fields: Py_None;
+    Py_INCREF(item);
+    PyTuple_SET_ITEM(result_set, 0, item);
+
+    item = self->res_rows ? self->res_rows: Py_None;
+    Py_INCREF(item);
+    PyTuple_SET_ITEM(result_set, 1, item);
+
+    Py_CLEAR(self->res_fields);
+    Py_CLEAR(self->res_rows);
 
     tag = read_string(buf, end);
     if (tag == NULL) {
-        return -1;
+        goto error;
     }
-    py_ret = PyObject_CallMethodObjArgs(
-        self->result,
-        add_result,
-        self->res_fields ? self->res_fields: Py_None,
-        self->res_rows ? self->res_rows : Py_None,
-        tag, NULL);
-    if (py_ret == NULL) {
-        goto end;
-    }
-    Py_CLEAR(self->res_fields);
-    Py_CLEAR(self->res_rows);
-    ret = 0;
 
-end:
-    Py_XDECREF(tag);
-    Py_XDECREF(result);
-    return ret;
+    PyTuple_SET_ITEM(result_set, 2, tag);
+
+    if (PyList_Append(self->result, result_set) == -1) {
+        goto error;
+    }
+    Py_DECREF(result_set);
+    return 0;
+error:
+    Py_DECREF(result_set);
+    return -1;
 }
 
 
@@ -747,6 +577,58 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     self->transaction_status = *buf[0];
     *buf += 1;
     self->status = _STATUS_READY_FOR_QUERY;
+
+    if (self->prepare_threshold) {
+        if (self->ex) {
+            if (self->cache_item && self->cache_item->prepared) {
+                self->cache_item->error = 1;
+                Py_CLEAR(self->cache_item->res_fields);
+                PyMem_Free(self->cache_item->res_converters);
+                self->cache_item->res_converters = NULL;
+            }
+        }
+        else if (self->result != Py_None &&
+                PyList_GET_SIZE(self->result) == 1) {
+            int stmt_index;
+            if (self->cache_item == NULL) {
+                Py_ssize_t cache_size;
+                cache_size = PyDict_Size(self->stmt_cache);
+
+                if (cache_size == self->cache_size) {
+                    Py_ssize_t ppos = 0;
+                    PyObject *old_key;
+                    PagioSTObject *old_cache_item;
+                    PyDict_Next(self->stmt_cache, &ppos, &old_key, (PyObject **)&old_cache_item);
+                    stmt_index = old_cache_item->index;
+                    if (old_cache_item->prepared) {
+                        self->stmt_to_close = stmt_index;
+                    }
+                    Py_INCREF(old_key);
+                    int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
+                    Py_DECREF(old_key);
+                    if (del_ret == -1) {
+                        return -1;
+                    }
+                }
+                else {
+                    stmt_index = cache_size + 1;
+                }
+                PagioSTObject *new_cache_item = (PagioSTObject *)PagioST_new(stmt_index, 1);
+                if (new_cache_item == NULL) {
+                    return -1;
+                }
+                if (PyDict_SetItem(
+                        self->stmt_cache, self->cache_key, (PyObject *)new_cache_item
+                        ) == -1) {
+                    return -1;
+                }
+            }
+            else if (!self->cache_item->prepared) {
+                self->cache_item->num_executed += 1;
+            }
+        }
+    }
+
     if (self->ex) {
         ret = PyObject_CallMethod((PyObject *)self, "_set_exception", "O", self->ex);
         Py_CLEAR(self->ex);
@@ -754,9 +636,10 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     else {
         ret = PyObject_CallMethodObjArgs((PyObject *)self, set_result, NULL);
     }
-    Py_CLEAR(self->result);
     Py_INCREF(Py_None);
     self->result = Py_None;
+    Py_CLEAR(self->cache_item);
+    Py_CLEAR(self->cache_key);
     if (ret == NULL) {
         return -1;
     }
@@ -770,6 +653,7 @@ PPhandle_message(PPObject *self, char *buf) {
     char *end;
     int(*handler)(PPObject*, char**, char*);
 
+//    fprintf(stderr, "Identifier: %c\n", self->identifier);
     end = buf + self->msg_len;
     switch (self->identifier) {
     case 'T':
@@ -784,12 +668,27 @@ PPhandle_message(PPObject *self, char *buf) {
     case '2':
         handler = PPhandle_bind_complete;
         break;
+    case '3':
+        handler = PPhandle_close_complete;
+        break;
     case 'C':
         handler = PPhandle_command_complete;
         break;
     case 'Z':
         handler = PPhandle_ready_for_query;
         break;
+    case 'E':
+        if (self->res_converters) {
+            if (!self->cache_item || !self->cache_item->prepared) {
+                // if the statement is prepared, the converters are owned by the
+                // cache item
+                PyMem_Free(self->res_converters);
+            }
+            self->res_converters = NULL;
+        }
+        Py_CLEAR(self->res_rows);
+        Py_CLEAR(self->res_fields);
+        handler = PPfallback_handler;
     default:
         handler = PPfallback_handler;
     }
@@ -883,153 +782,6 @@ safe_add(int *orig, Py_ssize_t extra) {
     return 0;
 }
 
-typedef struct {
-    const char* ptr;
-    union {
-        char c;
-        short int2;
-        int int4;
-        long long int8;
-        double float8;
-    } val;
-    int len;
-    int flags;
-    PyObject *obj;
-} ParamInfo;
-
-
-static int
-fill_unicode_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    Py_ssize_t size;
-
-    param_info->ptr = PyUnicode_AsUTF8AndSize(param, &size);
-    if (size > INT32_MAX) {
-        PyErr_SetString(PyExc_ValueError, "String parameter too long");
-        return -1;
-    }
-    param_info->len = (int) size;
-    return 0;
-}
-
-
-static int
-fill_object_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    PyObject *str_param;
-    int ret;
-
-    str_param = PyObject_Str(param);
-    if (str_param == NULL) {
-        return -1;
-    }
-    ret = fill_unicode_info(param_info, oid, p_fmt, str_param);
-    if (ret == 0) {
-        param_info->obj = str_param;
-    }
-    else {
-        Py_DECREF(str_param);
-    }
-    return ret;
-}
-
-
-static int
-fill_bool_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    param_info->val.c = (param == Py_True);
-    param_info->len = 1;
-    param_info->ptr = (char *)&param_info->val;
-    *oid = BOOLOID;
-    *p_fmt = 1;
-    return 0;
-}
-
-
-static int
-_fill_longlong_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, long long val)
-{
-    param_info->val.int8 = htobe64(val);
-    param_info->len = 8;
-    param_info->ptr = (char *)&param_info->val;
-    *oid = INT8OID;
-    *p_fmt = 1;
-    return 0;
-}
-
-
-#if SIZEOF_LONG == 4    /* for example on windows or 32 bits linux */
-
-static int
-fill_longlong_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    long long val;
-    int overflow;
-
-    val = PyLong_AsLongLongAndOverflow(param, &overflow);
-    if (overflow) {
-        return fill_object_info(param_info, oid, p_fmt, param);
-    }
-    return _fill_longlong_info(param_info, oid, p_fmt, val);
-}
-
-#endif
-
-static int
-fill_long_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    long val;
-    int overflow;
-
-    val = PyLong_AsLongAndOverflow(param, &overflow);
-#if SIZEOF_LONG == 4    /* for example on windows or 32 bits linux */
-    if (overflow) {
-        /* value does not fit in 32 bits, try with 64 bit integer instead */
-        return fill_longlong_info(param_info, oid, p_fmt, param);
-    }
-#else                   /* for example 64 bits linux */
-    if (overflow) {
-        /* value does not fit in 64 bits, use text instead */
-        return fill_object_info(param_info, oid, p_fmt, param);
-    }
-    if (val < INT32_MIN || val > INT32_MAX) {
-        /* value outside 32 bit range, use 64 bit integer instead */
-        return _fill_longlong_info(param_info, oid, p_fmt, val);
-    }
-#endif
-    /* value fits in 32 bits, set up parameter */
-    param_info->val.int4 = htobe32((int) val);
-    param_info->len = 4;
-    param_info->ptr = (char *)&param_info->val;
-    *oid = INT4OID;
-    *p_fmt = 1;
-    return 0;
-}
-
-
-static int
-fill_float_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
-{
-    union {
-        long long int8;
-        double float8;
-    } val;
-    val.float8 = PyFloat_AsDouble(param);
-    param_info->val.int8 = htobe64(val.int8);
-    param_info->len = 8;
-    param_info->ptr = (char *)&param_info->val;
-    *oid = FLOAT8OID;
-    *p_fmt = 1;
-    return 0;
-}
-
 
 static int
 fill_param_info(
@@ -1096,53 +848,254 @@ write_string(char **buf, const char *val, int val_len) {
 }
 
 
-static PyObject *
-execute_message_params(
-    char *sql, int sql_len, PyObject *params, int result_format)
+static int
+append_close_message(PyObject *message, int stmt_index) {
+    PyObject *msg;
+    int stmt_name_len, success = 0, msg_len;
+    char *buf, stmt_name[11];
+
+    if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
+        PyErr_SetString(PyExc_ValueError, "Error during string formatting.");
+        return -1;
+    }
+    stmt_name_len = (int)strlen(stmt_name);
+    msg_len = stmt_name_len + 6;
+
+    msg = PyBytes_FromStringAndSize(NULL, msg_len + 1);
+    if (msg == NULL) {
+        return -1;
+    }
+    // Close:
+    //      'C' (1)
+    //      message length (4)
+    //      'S' (1)
+    //      stmt_name (stmt_name_len + 1)
+    buf = PyBytes_AS_STRING(msg);
+    buf++[0] = 'C';
+    write_int4(&buf, msg_len);
+    buf++[0] = 'S';
+    write_string(&buf, stmt_name, stmt_name_len + 1);
+
+    if (PyList_Append(message, msg) == -1) {
+        success = -1;
+    }
+    Py_DECREF(msg);
+    return success;
+}
+
+
+static int
+fill_params(
+    PyObject *params,
+    ParamInfo **param_info,
+    unsigned int **oids,
+    unsigned short **p_formats,
+    int *param_vals_len)
 {
-    Py_ssize_t stmt_name_len=0, portal_name_len=0, num_params, total_length;
-    char *stmt_name = "", *portal_name = "", *buf;
-    int param_vals_len=0, bind_length, parse_len, describe_len, execute_len, i;
-    ParamInfo *param_info = NULL;
-    PyObject *py_buf = NULL;
-    unsigned int *oids = NULL;
-    short *p_formats = NULL;
+    Py_ssize_t num_params, i;
+
+    *param_vals_len = 0;
 
     num_params = PyTuple_GET_SIZE(params);
-    if (num_params > INT16_MAX) {
-        PyErr_SetString(PyExc_ValueError, "Too many parameters");
-        return NULL;
-    }
     if (num_params) {
-        param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
-        if (param_info == NULL) {
+        *param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
+        if (*param_info == NULL) {
             PyErr_NoMemory();
-            goto end;
+            return -1;
         }
-        oids = PyMem_Calloc(num_params, sizeof(unsigned int));
-        if (oids == NULL) {
+        *oids = PyMem_Calloc(num_params, sizeof(unsigned int));
+        if (*oids == NULL) {
             PyErr_NoMemory();
-            goto end;
+            return -1;
         }
-        p_formats = PyMem_Calloc(num_params, sizeof(p_formats));
-        if (p_formats == NULL) {
+        *p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
+        if (*p_formats == NULL) {
             PyErr_NoMemory();
-            goto end;
+            return -1;
         }
     }
     for (i = 0; i < num_params; i++) {
-        ParamInfo *p_info = param_info + i;
+        ParamInfo *p_info = *param_info + i;
         unsigned int oid = 0;
         short p_format = 0;
         if (fill_param_info(
                 p_info, &oid, &p_format, PyTuple_GET_ITEM(params, i)) == -1) {
-            goto end;
+            return -1;
         }
         if (p_info->len > 0) {
-            param_vals_len += p_info->len;
+            *param_vals_len += p_info->len;
         }
-        oids[i] = htobe32(oid);
-        p_formats[i] = htobe16(p_format);
+        (*oids)[i] = htobe32(oid);
+        (*p_formats)[i] = htobe16((unsigned short) p_format);
+    }
+    return 0;
+}
+
+
+static PyObject *
+get_cache_key(PyObject *sql, unsigned int *oids, Py_ssize_t num_params) {
+    if (num_params == 0) {
+        // No parameters, just use the sql statement
+        Py_INCREF(sql);
+        return sql;
+    }
+    // Create tuple of sql statement and bytes object filled with oids
+    PyObject *cache_key, *oid_bytes;
+    Py_ssize_t oids_size;
+
+    cache_key = PyTuple_New(2);
+    if (cache_key == NULL) {
+        return NULL;
+    }
+
+    oids_size = num_params * sizeof(unsigned int);
+    oid_bytes = PyBytes_FromStringAndSize(NULL, oids_size);
+    if (oid_bytes == NULL) {
+        Py_DECREF(cache_key);
+        return NULL;
+    }
+    memcpy(PyBytes_AS_STRING(oid_bytes), oids, oids_size);
+
+    Py_INCREF(sql);
+    PyTuple_SET_ITEM(cache_key, 0, sql);
+    PyTuple_SET_ITEM(cache_key, 1, oid_bytes);
+    return cache_key;
+}
+
+
+static int
+lookup_cache(
+    PPObject *self,
+    PyObject *message,
+    PyObject *sql,
+    unsigned int *oids,
+    Py_ssize_t num_params,
+    PyObject **cache_key,
+    PagioSTObject **cache_item,
+    int *prepared,
+    int *index)
+{
+    if (self->prepare_threshold == 0) {
+        // Caching disabled
+        return 0;
+    }
+
+    Py_hash_t cache_key_hash;
+    PagioSTObject *_cache_item = NULL;
+    PyObject *_cache_key;
+    int _prepared = 0, _index = 0;
+
+    _cache_key = get_cache_key(sql, oids, num_params);
+    if (_cache_key == NULL) {
+        return -1;
+    }
+
+    cache_key_hash = PyObject_Hash(_cache_key);
+    if (cache_key_hash == -1) {
+        goto error;
+    }
+    _cache_item = (PagioSTObject *)_PyDict_GetItem_KnownHash(
+        self->stmt_cache, _cache_key, cache_key_hash);
+    if (_cache_item == NULL) {
+        if (PyErr_Occurred()) {
+            goto error;
+        }
+    }
+    else {
+        // cache_item is borrowed, so increment refcount
+        Py_INCREF(_cache_item);
+
+        // Move to end by deleting and inserting again
+        if (_PyDict_DelItem_KnownHash(
+                self->stmt_cache, _cache_key, cache_key_hash) == -1) {
+            goto error;
+        }
+        if (_PyDict_SetItem_KnownHash(
+                self->stmt_cache, _cache_key, (PyObject *)_cache_item, cache_key_hash
+                ) == -1) {
+            goto error;
+        }
+        if (_cache_item->prepared) {
+            if (_cache_item->error) {
+                if (append_close_message(message, _cache_item->index) == -1) {
+                    goto error;
+                }
+            }
+            else {
+                _prepared = 1;
+                _index = _cache_item->index;
+            }
+        }
+        else {
+            if (_cache_item->num_executed == self->prepare_threshold) {
+                _index = _cache_item->index;
+            }
+        }
+    }
+    *cache_key = _cache_key;
+    *cache_item = _cache_item;
+    *prepared = _prepared;
+    *index = _index;
+    return 0;
+error:
+    Py_DECREF(_cache_key);
+    Py_XDECREF(_cache_item);
+    return -1;
+}
+
+
+static int
+append_simple_query_message(PyObject *message, PyObject *sql)
+{
+    const char *sql_bytes;
+    char *buf;
+    Py_ssize_t sql_len;
+    PyObject *query_msg;
+    int ret;
+
+    sql_bytes = PyUnicode_AsUTF8AndSize(sql, &sql_len);
+    if (sql_bytes == NULL) {
+        return -1;
+    }
+    query_msg = PyBytes_FromStringAndSize(NULL, sql_len + 6);
+    if (query_msg == NULL) {
+        return -1;
+    }
+    buf = PyBytes_AS_STRING(query_msg);
+    buf++[0] = 'Q';
+    write_int4(&buf, sql_len + 5);
+    write_string(&buf, sql_bytes, sql_len + 1);
+    ret = PyList_Append(message, query_msg);
+    Py_DECREF(query_msg);
+    return ret;
+}
+
+
+static int
+append_parse_message(
+        PyObject *message,
+        int stmt_index,
+        PyObject *sql,
+        unsigned int *oids,
+        Py_ssize_t num_params)
+{
+    const char *sql_bytes;
+    char *buf, stmt_name[11] = {0};
+    Py_ssize_t sql_len;
+    int parse_len, ret, stmt_name_len;
+    PyObject *parse_msg;
+
+    if (stmt_index) {
+        if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
+            PyErr_SetString(
+                PyExc_ValueError, "Error during string formatting.");
+            return -1;
+        }
+    }
+    stmt_name_len = strlen(stmt_name);
+    sql_bytes = PyUnicode_AsUTF8AndSize(sql, &sql_len);
+    if (sql_bytes == NULL) {
+        return -1;
     }
 
     // Parse:
@@ -1154,16 +1107,61 @@ execute_message_params(
     //      param_oids (num_params * 4)
     parse_len = 8;
     if (safe_add(&parse_len, stmt_name_len) == -1) {
-        return NULL;
+        return -1;
     }
     if (safe_add(&parse_len, sql_len) == -1) {
-        return NULL;
+        return -1;
     }
     if (safe_add(&parse_len, num_params * 4) == -1) {
-        return NULL;
+        return -1;
     }
-    total_length = parse_len + 1;
 
+    parse_msg = PyBytes_FromStringAndSize(NULL, parse_len + 1);
+    if (parse_msg == NULL) {
+        return -1;
+    }
+    buf = PyBytes_AS_STRING(parse_msg);
+    buf++[0] = 'P';
+    write_int4(&buf, parse_len);
+    write_string(&buf, stmt_name, stmt_name_len + 1);
+    write_string(&buf, sql_bytes, sql_len + 1);
+    write_int2(&buf, (short)num_params);
+    if (num_params) {
+        write_string(
+            &buf, (const char *)oids, num_params * sizeof(unsigned int));
+    }
+    ret = PyList_Append(message, parse_msg);
+    Py_DECREF(parse_msg);
+    return ret;
+}
+
+
+static int
+append_bind_message(
+    PyObject *message,
+    int stmt_index,
+    ParamInfo *param_info,
+    unsigned short *p_formats,
+    Py_ssize_t num_params,
+    int param_vals_len,
+    int result_format)
+{
+    int bind_length, i;
+    char *portal_name = "", *buf, stmt_name[11] = {0};
+    size_t portal_name_len, stmt_name_len;
+    PyObject *bind_msg;
+
+    if (stmt_index) {
+        if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
+            PyErr_SetString(
+                PyExc_ValueError, "Error during string formatting.");
+            return -1;
+        }
+    }
+    if (result_format == -1) {
+        // if default use binary for extended protocol
+        result_format = 1;
+    }
     // Bind:
     //      identifier 'B' (1)
     //      message length (4)
@@ -1177,64 +1175,28 @@ execute_message_params(
     //          param values length (param_vals_len)
     //      num_result_formats=1 (2)
     //      result_format (2)
+
+    // calculate length
+    portal_name_len = strlen(portal_name);
+    stmt_name_len = strlen(stmt_name);
     bind_length = 14;
     if (safe_add(&bind_length, portal_name_len) == -1) {
-        return NULL;
+        return -1;
     }
     if (safe_add(&bind_length, stmt_name_len) == -1) {
-        return NULL;
+        return -1;
     }
     if (safe_add(&bind_length, num_params * 6) == -1) {
-        return NULL;
+        return -1;
     }
     if (safe_add(&bind_length, param_vals_len) == -1) {
-        return NULL;
+        return -1;
     }
-    total_length += bind_length + 1;
-
-    // Describe Portal:
-    //      'D' (1)
-    //      message length (4)
-    //      type='P' (1)
-    //      portal name (portal_name_len + 1)
-    describe_len = 6;
-    if (safe_add(&describe_len, portal_name_len) == -1) {
-        return NULL;
+    bind_msg = PyBytes_FromStringAndSize(NULL, bind_length + 1);
+    if (bind_msg == NULL) {
+        return -1;
     }
-    total_length += describe_len + 1;
-
-    // Execute:
-    //      'E' (1)
-    //      message length (4)
-    //      portal name (portal_name_len + 1)
-    //      num_rows=0 (4)
-    execute_len = 9;
-    if (safe_add(&execute_len, portal_name_len) == -1) {
-        return NULL;
-    }
-    total_length += execute_len + 1;
-
-    // Sync:
-    //      'S' (1)
-    //      message length=4 (4)
-    total_length += 5;
-
-    py_buf = PyBytes_FromStringAndSize(NULL, total_length);
-    if (py_buf == NULL) {
-        goto end;
-    }
-    buf = PyBytes_AS_STRING(py_buf);
-
-    // parse
-    buf++[0] = 'P';
-    write_int4(&buf, parse_len);
-    write_string(&buf, stmt_name, stmt_name_len + 1);
-    write_string(&buf, sql, sql_len + 1);
-    write_int2(&buf, (short)num_params);
-    if (num_params) {
-        write_string(
-            &buf, (const char *)oids, num_params * sizeof(unsigned int));
-    }
+    buf = PyBytes_AS_STRING(bind_msg);
 
     // bind
     buf++[0] = 'B';
@@ -1257,68 +1219,169 @@ execute_message_params(
     write_int2(&buf, 1);
     write_int2(&buf, result_format);
 
-    // describe
-    buf++[0] = 'D';
-    write_int4(&buf, describe_len);
-    buf++[0] = 'P';
-    write_string(&buf, portal_name, portal_name_len + 1);
+    int ret = PyList_Append(message, bind_msg);
+    Py_DECREF(bind_msg);
+    return ret;
+}
 
-    // execute and sync
-    buf++[0] = 'E';
-    write_int4(&buf, execute_len);
-    write_string(&buf, portal_name, portal_name_len + 1);
-    write_string(&buf, "\0\0\0\0S\0\0\0\x04", 9);
+
+static int
+append_fixed_message(PyObject *message, const char *string, int len)
+{
+    PyObject *msg;
+
+    msg = PyBytes_FromStringAndSize(string, len);
+    if (msg == NULL) {
+        return -1;
+    }
+    int ret = PyList_Append(message, msg);
+    Py_DECREF(msg);
+    return ret;
+}
+
+
+static inline int
+append_desc_message(PyObject *message)
+{
+    return append_fixed_message(message, "D\0\0\0\x06P\0", 7);
+}
+
+static inline int
+append_exec_sync_message(PyObject *message)
+{
+    return append_fixed_message(message, "E\0\0\0\t\0\0\0\0\0S\0\0\0\x04", 15);
+}
+
+
+static int
+_PPexecute_message(
+    PPObject *self, PyObject *message, PyObject *sql, PyObject *params, int result_format)
+{
+    ParamInfo *param_info = NULL;
+    unsigned int *oids = NULL;
+    unsigned short *p_formats = NULL;
+    PyObject *cache_key = NULL, *new_result;
+    PagioSTObject *cache_item = NULL;
+    int prepared = 0;
+    int index = 0;
+    int ret = -1;
+    int param_vals_len;
+
+    if (self->stmt_to_close) {
+        if (append_close_message(message, self->stmt_to_close) == -1) {
+            goto end;
+        }
+    }
+    if (fill_params(params, &param_info, &oids, &p_formats, &param_vals_len) == -1) {
+        goto end;
+    }
+    if (lookup_cache(
+            self, message, sql, oids, PyTuple_GET_SIZE(params), &cache_key,
+            &cache_item, &prepared, &index) == -1) {
+        goto end;
+    }
+
+    if (PyTuple_GET_SIZE(params) == 0 &&
+            (result_format == 0 || result_format == -1) && !prepared &&
+            !index) {
+        // Might be multiple statements, so use simple query
+        if (append_simple_query_message(message, sql) == -1) {
+            goto end;
+        }
+    } else {
+        // use extended query
+        if (!prepared) {
+            if (append_parse_message(
+                    message, index, sql, oids, PyTuple_GET_SIZE(params)) == -1) {
+                goto end;
+            }
+        }
+
+        if (append_bind_message(
+                message, index, param_info, p_formats,
+                PyTuple_GET_SIZE(params), param_vals_len, result_format
+                ) == -1) {
+            goto end;
+        }
+
+        if (!prepared) {
+            if (append_desc_message(message) == -1) {
+                goto end;
+            }
+        }
+        if (append_exec_sync_message(message) == -1) {
+            goto end;
+        }
+    }
+    new_result = PyList_New(0);
+    if (new_result == NULL) {
+        goto end;
+    }
+    Py_CLEAR(self->result);
+    self->result = new_result;
+
+    if (self->prepare_threshold) {
+        if (prepared) {
+            PyObject *res_rows = NULL;
+            if (cache_item->res_fields) {
+                res_rows = PyList_New(0);
+                if (res_rows == NULL) {
+                    Py_CLEAR(message);
+                    goto end;
+                }
+            }
+            self->res_fields = cache_item->res_fields;
+            Py_XINCREF(self->res_fields);
+            self->res_converters = cache_item->res_converters;
+            Py_XINCREF(self->res_fields);
+            self->res_rows = res_rows;
+        }
+        Py_INCREF(cache_key);
+        self->cache_key = cache_key;
+        Py_XINCREF(cache_item);
+        self->cache_item = cache_item;
+    }
+    self->status = _STATUS_EXECUTING;
+    ret = 0;
 
 end:
-    clean_param_info(param_info, num_params);
+    clean_param_info(param_info, PyTuple_GET_SIZE(params));
     PyMem_Free(oids);
     PyMem_Free(p_formats);
-    return py_buf;
+    Py_XDECREF(cache_key);
+    Py_XDECREF(cache_item);
+    return ret;
 }
+
 
 static PyObject *
 PPexecute_message(PPObject *self, PyObject *args, PyObject *kwargs)
 {
-    char *sql, *msg;
-    Py_ssize_t sql_len;
-    PyObject *params, *message=NULL, *result=NULL;
-    int result_format=0;
     static char *kwlist[] = {"", "", "result_format", NULL};
+    PyObject *sql, *params, *message;
+    int result_format = 0;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "s#O!|$i:execute_message", kwlist, &sql, &sql_len, &PyTuple_Type, &params, &result_format)) {
+            args, kwargs, "O!O!|$i:execute_message", kwlist, &PyUnicode_Type,
+            &sql, &PyTuple_Type, &params, &result_format)) {
         return NULL;
     }
-    if (sql_len > INT32_MAX) {
-        PyErr_SetString(PyExc_ValueError, "SQL statement too long");
-        goto end;
+    if (PyTuple_GET_SIZE(params) > INT16_MAX) {
+        PyErr_SetString(PyExc_ValueError, "Too many parameters");
+        return NULL;
     }
-    result = PyObject_CallObject(ResultSetType, NULL);
-    if (result == NULL) {
-        goto end;
+    if (result_format < -1 || result_format > 1) {
+        PyErr_SetString(PyExc_ValueError, "Invalid result format.");
+        return NULL;
     }
-    if (PyTuple_GET_SIZE(params) == 0 && result_format == 0) {
-        message = PyBytes_FromStringAndSize(NULL, sql_len + 6);
-        if (message == NULL) {
-            goto end;
-        }
-        msg = PyBytes_AS_STRING(message);
-        msg[0] = 'Q';
-        pack_int4(msg + 1, sql_len + 5);
-        memcpy(msg + 5, sql, sql_len);
-        msg[sql_len + 5] = '\0';
+    message = PyList_New(0);
+    if (message == NULL) {
+        return NULL;
     }
-    else {
-        message = execute_message_params(sql, (int) sql_len, params, result_format);
-        if (message == NULL)
-            goto end;
+    if (_PPexecute_message(self, message, sql, params, result_format) == -1) {
+        Py_CLEAR(message);
     }
-    Py_CLEAR(self->result);
-    self->result = result;
-    result = NULL;
-    self->status = _STATUS_EXECUTING;
-end:
-    Py_XDECREF(result);
+
     return message;
 }
 
@@ -1344,7 +1407,12 @@ static PyMemberDef PP_members[] = {
     {"_transaction_status", T_UBYTE, offsetof(PPObject, transaction_status), 0,
      "transaction status"
     },
-
+    {"_prepare_threshold", T_UINT, offsetof(PPObject, prepare_threshold), 0,
+     "prepare threshold"
+    },
+    {"_cache_size", T_UINT, offsetof(PPObject, cache_size), 0,
+     "cache size"
+    },
     {NULL}  /* Sentinel */
 };
 
@@ -1357,7 +1425,6 @@ static PyTypeObject PPType = {
     .tp_itemsize = 0,
     .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
     .tp_new = PP_new,
-//    .tp_init = NULL,
     .tp_dealloc = (destructor) PP_dealloc,
     .tp_members = PP_members,
     .tp_methods = PP_methods,
@@ -1391,23 +1458,9 @@ static PyStructSequence_Desc FIDesc = {
     7
 };
 
-
-static int
-load_result() {
-    PyObject *common;
-
-    common = PyImport_ImportModule("pagio.common");
-    if (common == NULL) {
-        return -1;
-    }
-    ResultSetType = PyObject_GetAttrString(common, "ResultSet");
-    Py_DECREF(common);
-    if (ResultSetType == NULL) {
-        return -1;
-    }
-    return 0;
-}
-
+#if (defined(__GNUC__))
+#pragma GCC visibility pop
+#endif
 
 PyMODINIT_FUNC
 PyInit__pagio(void)
@@ -1416,6 +1469,10 @@ PyInit__pagio(void)
 
     if (PyType_Ready(&PPType) < 0)
         return NULL;
+
+    if (PyType_Ready(&PagioST_Type) < 0)
+        return NULL;
+    Py_INCREF(&PagioST_Type);
 
     m = PyModule_Create(&PPModule);
     if (m == NULL)
@@ -1442,14 +1499,6 @@ PyInit__pagio(void)
         return NULL;
     }
 
-    if (load_result() == -1) {
-        Py_DECREF(&FIType);
-        Py_DECREF(&PPType);
-        Py_DECREF(m);
-        return NULL;
-    }
-
-    add_result = PyUnicode_InternFromString("_add_result");
     set_result = PyUnicode_InternFromString("_set_result");
 
     return m;

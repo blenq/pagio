@@ -146,6 +146,33 @@ class ConnCase(IsolatedAsyncioTestCase):
                 "SELECT COUNT(*) AS num2 FROM pg_prepared_statements")
             self.assertEqual(res.rows[0][0], 1)
 
+    async def test_multi_stmt(self):
+        async with await AsyncConnection(database="postgres") as cn:
+            res = await cn.execute("BEGIN;SELECT 1;COMMIT")
+            self.assertIsNone(res.fields)
+            res.next_result()
+            self.assertIsNotNone(res.fields)
+            res.next_result()
+            self.assertIsNone(res.fields)
+
+    async def test_expired_statement(self):
+        async with await AsyncConnection(
+                database="postgres", prepare_threshold=1) as cn:
+            await cn.execute("CREATE TEMPORARY TABLE test_val (id serial, val int)")
+            await cn.execute("SELECT * FROM test_val")
+
+            # execute for the second time, will prepare the statement
+            await cn.execute("SELECT * FROM test_val")
+
+            # recreate table with different type
+            await cn.execute(
+                "DROP TABLE test_val;"
+                "CREATE TEMPORARY TABLE test_val (id serial, val text)")
+
+            # cached statement is not valid anymore
+            res = await cn.execute("SELECT * FROM test_val")
+            self.assertEqual(res.fields[1].type_oid, 25)
+
 
 class PyConnCase(ConnCase):
     @classmethod

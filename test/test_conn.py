@@ -1,5 +1,5 @@
 import unittest
-
+import sys
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
@@ -138,6 +138,32 @@ class ConnCase(unittest.TestCase):
             res = cn.execute(
                 "SELECT COUNT(*) AS num2 FROM pg_prepared_statements")
             self.assertEqual(res.rows[0][0], 1)
+
+    def test_multi_stmt(self):
+        with Connection(database="postgres") as cn:
+            res = cn.execute("BEGIN;SELECT 1;COMMIT")
+            self.assertIsNone(res.fields)
+            res.next_result()
+            self.assertIsNotNone(res.fields)
+            res.next_result()
+            self.assertIsNone(res.fields)
+
+    def test_expired_statement(self):
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("CREATE TEMPORARY TABLE test_val (id serial, val int)")
+            cn.execute("SELECT * FROM test_val")
+
+            # execute for the second time, will prepare the statement
+            cn.execute("SELECT * FROM test_val")
+
+            # recreate table with different type
+            cn.execute(
+                "DROP TABLE test_val;"
+                "CREATE TEMPORARY TABLE test_val (id serial, val text)")
+
+            # cached statement is not valid anymore
+            res = cn.execute("SELECT * FROM test_val")
+            self.assertEqual(res.fields[1].type_oid, 25)
 
 
 class PyConnCase(ConnCase):

@@ -1,10 +1,10 @@
 from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop)
-from typing import Optional, Any, Union, cast, Sequence
+from typing import Optional, Any, Union, cast, Sequence, List
 
 from .base_protocol import (
     BasePGProtocol, PyBasePGProtocol, ProtocolStatus, Format)
-from .common import ResultSet
+from .common import ResultSet, CachedQueryExpired
 
 
 class _AsyncPGProtocol:
@@ -39,6 +39,11 @@ class _AsyncPGProtocol:
             await shield(self._write_fut)
         self._transport.write(data)
 
+    async def writelines(self, data: List[bytes]) -> None:
+        if self._write_fut is not None:
+            await shield(self._write_fut)
+        self._transport.writelines(data)
+
     async def startup(
             self,
             user: str,
@@ -59,17 +64,28 @@ class _AsyncPGProtocol:
             await self.write(message)
             message = await self._read_fut
 
-    async def execute(
+    async def _execute(
             self,
             sql: str,
-            parameters: Optional[Sequence[Any]],
+            parameters: Sequence[Any],
             result_format: Format,
     ) -> ResultSet:
         msg = self.execute_message(
             sql, parameters, result_format=result_format)
         self._read_fut = self._loop.create_future()
-        await self.write(msg)
-        return cast(ResultSet, await self._read_fut)
+        await self.writelines(msg)
+        return ResultSet(await self._read_fut)
+
+    async def execute(
+            self,
+            sql: str,
+            parameters: Sequence[Any],
+            result_format: Format,
+    ) -> ResultSet:
+        try:
+            return await self._execute(sql, parameters, result_format)
+        except CachedQueryExpired:
+            return await self._execute(sql, parameters, result_format)
 
     async def close(self) -> None:
         if self._status == ProtocolStatus.READY_FOR_QUERY:
