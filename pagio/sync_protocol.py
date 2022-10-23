@@ -113,8 +113,8 @@ class _PGProtocol:
     def _set_exception(self, ex: BaseException) -> None:
         self._sync_result = ex
 
-    def _set_result(self) -> None:
-        self._sync_result = self._result
+    def _set_result(self, result) -> None:
+        self._sync_result = result
 
 
 class PGProtocol(_PGProtocol, BasePGProtocol):

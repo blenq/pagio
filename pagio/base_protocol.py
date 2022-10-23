@@ -185,7 +185,7 @@ class _BasePGProtocol:
         self.user: Union[None, str, bytes] = None
 
     @abstractmethod
-    def _set_result(self) -> None:
+    def _set_result(self, result: Any) -> None:
         ...
 
     @abstractmethod
@@ -332,9 +332,7 @@ class _BasePGProtocol:
 
             pw_len = len(password) + 1
             struct_fmt = f'!ci{pw_len}s'
-            self._result = pack(struct_fmt, b'p', pw_len + 4, password)
-            self._set_result()
-            self._result = None
+            self._set_result(pack(struct_fmt, b'p', pw_len + 4, password))
         else:
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")
@@ -397,7 +395,7 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         self.res_converters = None
 
         # return values
-        self._result: Any = None
+        self._result: Optional[List] = None
         self._ex: Optional[ServerError] = None
 
         # status vars
@@ -744,7 +742,7 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             self._set_exception(self._ex)
             self._ex = None
         else:
-            self._set_result()
+            self._set_result(self._result)
         self._result = None
 
 

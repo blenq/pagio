@@ -100,9 +100,9 @@ class _AsyncPGProtocol:
         if self._read_fut and not self._read_fut.done():
             self._read_fut.set_exception(ex)
 
-    def _set_result(self) -> None:
+    def _set_result(self, result) -> None:
         if self._read_fut and not self._read_fut.done():
-            self._read_fut.set_result(self._result)
+            self._read_fut.set_result(result)
 
 
 class AsyncPGProtocol(_AsyncPGProtocol, BasePGProtocol, BufferedProtocol):

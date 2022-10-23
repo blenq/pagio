@@ -176,8 +176,6 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF(self);
         return NULL;
     }
-    Py_INCREF(Py_None);
-    self->result = Py_None;
     self->status = _STATUS_CLOSED;
     return (PyObject *) self;
 }
@@ -587,8 +585,7 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
                 self->cache_item->res_converters = NULL;
             }
         }
-        else if (self->result != Py_None &&
-                PyList_GET_SIZE(self->result) == 1) {
+        else if (self->result && PyList_GET_SIZE(self->result) == 1) {
             int stmt_index;
             if (self->cache_item == NULL) {
                 Py_ssize_t cache_size;
@@ -634,10 +631,11 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
         Py_CLEAR(self->ex);
     }
     else {
-        ret = PyObject_CallMethodObjArgs((PyObject *)self, set_result, NULL);
+        PyObject *result = self->result ? self->result : Py_None;
+        ret = PyObject_CallMethodObjArgs(
+            (PyObject *)self, set_result, result, NULL);
     }
-    Py_INCREF(Py_None);
-    self->result = Py_None;
+    Py_CLEAR(self->result);
     Py_CLEAR(self->cache_item);
     Py_CLEAR(self->cache_key);
     if (ret == NULL) {
@@ -1260,7 +1258,7 @@ _PPexecute_message(
     ParamInfo *param_info = NULL;
     unsigned int *oids = NULL;
     unsigned short *p_formats = NULL;
-    PyObject *cache_key = NULL, *new_result;
+    PyObject *cache_key = NULL;
     PagioSTObject *cache_item = NULL;
     int prepared = 0;
     int index = 0;
@@ -1313,12 +1311,11 @@ _PPexecute_message(
             goto end;
         }
     }
-    new_result = PyList_New(0);
-    if (new_result == NULL) {
+    Py_CLEAR(self->result);
+    self->result = PyList_New(0);
+    if (self->result == NULL) {
         goto end;
     }
-    Py_CLEAR(self->result);
-    self->result = new_result;
 
     if (self->prepare_threshold) {
         if (prepared) {
@@ -1401,7 +1398,7 @@ static PyMethodDef PP_methods[] = {
 
 
 static PyMemberDef PP_members[] = {
-    {"_result", T_OBJECT_EX, offsetof(PPObject, result), 0, "result"},
+//    {"_result", T_OBJECT_EX, offsetof(PPObject, result), 0, "result"},
     {"_status", T_INT, offsetof(PPObject, status), 0, "Protocol status"},
     {"_ex", T_OBJECT, offsetof(PPObject, ex), 0, "server error"},
     {"_transaction_status", T_UBYTE, offsetof(PPObject, transaction_status), 0,
