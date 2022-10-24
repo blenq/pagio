@@ -633,7 +633,7 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     else {
         PyObject *result = self->result ? self->result : Py_None;
         ret = PyObject_CallMethodObjArgs(
-            (PyObject *)self, set_result, result, NULL);
+            (PyObject *)self, set_result, result, Py_True, NULL);
     }
     Py_CLEAR(self->result);
     Py_CLEAR(self->cache_item);

@@ -6,7 +6,7 @@ from hashlib import md5
 from struct import Struct, unpack_from, pack
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
-    Sequence, Type)
+    Type, OrderedDict as TypingOrderedDict)
 
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
@@ -23,7 +23,6 @@ ushort_struct_unpack_from = Struct('!H').unpack_from
 int2_struct = Struct('!h')
 int2_struct_unpack = int2_struct.unpack
 int_struct = Struct('!i')
-# int_struct_pack = int_struct.pack
 int_struct_unpack = int_struct.unpack
 int_struct_unpack_from = int_struct.unpack_from
 
@@ -162,8 +161,45 @@ def text_bool_to_python(buf: memoryview) -> bool:
 DBConverter = Callable[[memoryview], Any]
 
 
-class _BasePGProtocol:
-    res_converters: List[DBConverter]
+class _AbstractPGProtocol(ABC):
+    @abstractmethod
+    def _set_result(self, result: Any, final: bool) -> None:
+        ...
+
+    @abstractmethod
+    def _set_exception(self, ex: BaseException) -> None:
+        ...
+
+    @abstractmethod
+    def _close(self) -> None:
+        ...
+
+    @abstractmethod
+    def get_buffer(self, sizehint: int) -> memoryview:
+        ...
+
+    @abstractmethod
+    def buffer_updated(self, nbytes: int) -> None:
+        ...
+
+    @abstractmethod
+    def execute_message(
+        self,
+        sql: str,
+        parameters: Tuple[Any, ...],
+        result_format: Format,
+    ) -> List[bytes]:
+        ...
+
+
+class _BasePGProtocol(_AbstractPGProtocol):
+    """ Common functionality for pure python and c accelerated versions of
+    the PG protocol class, sync and async.
+
+    """
+    res_converters: Optional[List[DBConverter]]
+    _transaction_status: int
+    _ex: Optional[ServerError]
 
     def __init__(self) -> None:
         self._handlers: Dict[int, Callable[[memoryview], None]] = {
@@ -178,23 +214,10 @@ class _BasePGProtocol:
             ]}
         self._status_parameters: Dict[str, str] = {}
         self._iso_dates = False
-        self._integer_datetimes = False
         self._tz_info: Optional[ZoneInfo] = None
         self._backend: Optional[Tuple[int, int]] = None
         self.password: Union[None, str, bytes] = None
         self.user: Union[None, str, bytes] = None
-
-    @abstractmethod
-    def _set_result(self, result: Any) -> None:
-        ...
-
-    @abstractmethod
-    def _set_exception(self, ex: BaseException) -> None:
-        ...
-
-    @abstractmethod
-    def _close(self) -> None:
-        ...
 
     @property
     def transaction_status(self) -> TransactionStatus:
@@ -208,13 +231,13 @@ class _BasePGProtocol:
     def tz_info(self) -> Union[None, ZoneInfo]:
         return self._tz_info
 
-    def handle_message(self, identifier, buf):
+    def handle_message(self, identifier: int, buf: memoryview) -> None:
         self._handlers[identifier](buf)
 
     def _startup_message(
             self, user: Union[str, bytes], database: Optional[str],
             application_name: Optional[str], tz_name: Optional[str],
-            password: Union[None, str, bytes]) -> bytes:
+            password: Union[None, str, bytes]) -> List[bytes]:
         parameters = []
         struct_format = ["!ii"]
 
@@ -242,7 +265,7 @@ class _BasePGProtocol:
         self.user = user
         self.password = password
         self._status = _STATUS_STARTING_UP
-        return message
+        return [message]
 
     def terminate_message(self) -> bytes:
         self._status = _STATUS_CLOSING
@@ -293,7 +316,7 @@ class _BasePGProtocol:
 
         if ex_args[16] == "RevalidateCachedQuery":
             # recognize this particular error, to easily handle retry
-            ex_class = CachedQueryExpired
+            ex_class: Type[ServerError] = CachedQueryExpired
         else:
             ex_class = ServerError
         ex = ex_class(*ex_args)
@@ -332,7 +355,8 @@ class _BasePGProtocol:
 
             pw_len = len(password) + 1
             struct_fmt = f'!ci{pw_len}s'
-            self._set_result(pack(struct_fmt, b'p', pw_len + 4, password))
+            self._set_result(
+                [pack(struct_fmt, b'p', pw_len + 4, password)], False)
         else:
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")
@@ -340,19 +364,18 @@ class _BasePGProtocol:
     def handle_parameter_status(self, msg_buf: memoryview) -> None:
         # format: "{param_name}\0{param_value}\0"
 
-        param = decode(msg_buf)
-        param_parts = param.split('\0')
-        if len(param_parts) != 3 or param_parts[2] != '':
+        param = bytes(msg_buf)
+        param_parts = param.split(b'\0')
+        if len(param_parts) != 3 or param_parts[2] != b'':
             raise ProtocolError("Invalid parameter status message")
-        name, val = param_parts[:2]
-        if name == "client_encoding":
-            if val != 'UTF8':
-                raise InvalidOperationError(
-                    "The pagio library only works with 'UTF-8' encoding")
-        elif name == "DateStyle":
+        b_name, b_val = param_parts[:2]
+        if b_name == b"client_encoding" and b_val != b'UTF8':
+            raise InvalidOperationError(
+                "The pagio library only works with 'UTF-8' encoding")
+        name = decode(b_name)
+        val = decode(b_val)
+        if name == "DateStyle":
             self._iso_dates = val.startswith("ISO,")
-        elif name == "integer_datetimes":
-            self._integer_datetimes = (val == 'on')
         elif name == "TimeZone":
             try:
                 self._tz_info = ZoneInfo(val)
@@ -370,17 +393,24 @@ class _BasePGProtocol:
         check_length_equal(0, msg_buf)
 
 
-class PyBasePGProtocol(_BasePGProtocol, ABC):
+ParamConverter = Callable[[Any, int], Tuple[int, str, Any, int, Format]]
+ResConverter = Callable[[memoryview], Any]
+CacheKey = Union[str, Tuple[str, Tuple[int]]]
 
-    def __init__(self) -> None:
+
+class PyBasePGProtocol(_AbstractPGProtocol):
+    """ Pure Python functionality for both sync and async protocol """
+
+    _handlers: Dict[int, Callable[[memoryview], None]]
+
+    def __init__(self, *args: Tuple[Any]) -> None:
 
         # cache stuff
-        self._cache = OrderedDict()
-        self._cache_item = None
-        self._close_stmt = None
+        self._cache: TypingOrderedDict[CacheKey, Dict[str, Any]] = OrderedDict()
+        self._cache_item: Optional[Dict[str, Any]] = None
         self._prepare_threshold = 5
         self._cache_size = 100
-        self.cache_key = None
+        self.cache_key: Optional[CacheKey] = None
 
         # reading buffers and counters
         self._bytes_read = 0
@@ -390,19 +420,19 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         self._identifier = None
 
         # resultset vars
-        self.res_rows = None
-        self.res_fields = None
-        self.res_converters = None
+        self.res_rows: Optional[List[Tuple[Any, ...]]] = None
+        self.res_fields: Optional[List[FieldInfo]] = None
+        self.res_converters: Optional[List[ResConverter]] = None
 
         # return values
-        self._result: Optional[List] = None
+        self._result: Optional[List[Tuple[Optional[List[FieldInfo]], Optional[List[Tuple[Any, ...]]], str]]] = None
         self._ex: Optional[ServerError] = None
 
         # status vars
         self._status = _STATUS_CLOSED
         self._transaction_status = 0
 
-        super().__init__()
+        super().__init__(*args)
         self._handlers.update({
             ord(k): v for k, v in [
                 ('1', self.handle_parse_complete),
@@ -427,7 +457,7 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             VARCHAROID: (decode, decode),
             BPCHAROID: (decode, decode),
         }
-        self.param_converters = {
+        self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: int_to_pg,
             str: str_to_pg,
             type(None): none_to_pg,
@@ -449,7 +479,6 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             if self._identifier is None:
                 self._identifier, new_msg_len = header_struct_unpack_from(
                     self._standard_buf, msg_start)
-                # print(chr(self._identifier))
                 new_msg_len -= 4
                 if new_msg_len < 0:
                     raise ProtocolError("Negative message length")
@@ -475,18 +504,19 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def convert_param(self, param: Any) -> Tuple[int, str, Any, int, Format]:
         return self.param_converters.get(type(param), default_to_pg)(param, 0)
 
-    def _append_close_statement_msg(self, message: List[bytes], stmt_name):
+    def _close_statement_msg(self, stmt_name: bytes) -> bytes:
         name_len = len(stmt_name)
-        message.append(pack(
-            f"!cic{name_len + 1}s", b"C", 6 + name_len, b'S', stmt_name))
+        return pack(
+            f"!cic{name_len + 1}s", b"C", 6 + name_len, b'S', stmt_name)
 
-    def _simple_query_msg(self, sql):
+    def _simple_query_msg(self, sql: str) -> bytes:
         sql_bytes = sql.encode()
         sql_len = len(sql_bytes)
         return pack(f"!ci{sql_len + 1}s", b'Q', sql_len + 5, sql_bytes)
 
     def _parse_msg(
-            self, sql: str, stmt_name: bytes, param_oids: Tuple[int, ...]):
+            self, sql: str, stmt_name: bytes, param_oids: Tuple[int, ...]
+        ) -> bytes:
         sql_bytes = sql.encode()
         sql_len = len(sql_bytes)
         stmt_name_len = len(stmt_name)
@@ -498,8 +528,14 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             stmt_name, sql_bytes, num_params, *param_oids)
 
     def _bind_msg(
-            self, stmt_name, param_vals, param_structs, param_lens, param_fmts,
-            result_format):
+            self,
+            stmt_name: bytes,
+            param_vals: Tuple[bytes],
+            param_structs: Tuple[str],
+            param_lens: Tuple[int],
+            param_fmts: Tuple[int],
+            result_format: Format,
+        ) -> bytes:
 
         if result_format == Format.DEFAULT:
             result_format = Format.BINARY
@@ -507,7 +543,7 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         num_params = len(param_fmts)
         bind_length = stmt_name_len + 14 + num_params * 6
 
-        param_pg_vals = []
+        param_pg_vals: List[Any] = []
         param_pg_fmts = []
         if num_params:
             for param_val, param_struct, param_len in zip(
@@ -531,44 +567,46 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def execute_message(
             self,
             sql: str,
-            parameters: Tuple[Any],
+            parameters: Tuple[Any, ...],
             result_format: Format,
-    ) -> bytes:
+    ) -> List[bytes]:
         message = []
 
+        param_oids: Tuple[int]
         if parameters:
             param_oids, param_structs, param_vals, param_lens, param_fmts = zip(
                 *(self.convert_param(p) for p in parameters))
         else:
-            param_structs = param_vals = param_lens = param_fmts = param_oids = ()
+            param_oids = cast(Tuple[int], ())
+            param_structs = param_vals = param_lens = param_fmts = ()
 
         stmt_name = b''
 
-        if self._close_stmt is not None:
-            self._append_close_statement_msg(message, self._close_stmt)
-
         prepared = False
-
+        cache_item = None
         if self._prepare_threshold:
-            cache_key = (sql, param_oids) if parameters else sql
+            cache_key: CacheKey = (sql, param_oids) if parameters else sql
             cache_item = self._cache.get(cache_key)
             if cache_item:
                 # statement executed before, move to end of cache
-                self._cache.move_to_end(cache_key)
+                # self._cache.move_to_end(cache_key)
                 if cache_item["prepared"]:
                     # statement is prepared server side
-                    if cache_item["error"]:
-                        # Previous execution resulted in an error. Close
-                        # the statement server side.
-                        self._append_close_statement_msg(
-                            message, cache_item["name"])
-                    else:
-                        # Reuse server side statement and skip parsing
-                        prepared = True
-                        stmt_name = cache_item["name"]
+                    # Reuse server side statement and skip parsing
+                    prepared = True
+                    stmt_name = cache_item["name"]
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
+                        # Using a non-empty statement name for reuse
                         stmt_name = cache_item["name"]
+            else:
+                cache_item = {
+                    "prepared": False,
+                    "num_executed": 0,
+                    "res_fields": None,
+                    "res_converters": None,
+                    "name": None,
+                }
 
         if (not parameters
                 and result_format in (Format.TEXT, Format.DEFAULT)
@@ -595,7 +633,7 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
                 b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
 
         # Set up for results
-        if self._prepare_threshold:
+        if cache_item is not None:
             self.cache_key = cache_key
             self._cache_item = cache_item
             if prepared:
@@ -619,13 +657,9 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
 
     def handle_close_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
-        if self._close_stmt:
-            # An earlier statement was evicted from the cache
-            self._close_stmt = None
-        elif self._cache_item is not None and self._cache_item["error"]:
-            # Reset a statement that had state error
-            self._cache_item.update(
-                num_executed=0, prepared=False, error=False)
+        if self._cache_item is not None:
+            # Reset the statement
+            self._cache_item.update(num_executed=0, prepared=False)
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
@@ -662,6 +696,8 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
                 res_fields=res_fields, res_converters=converters)
 
     def handle_data_row(self, buf: memoryview) -> None:
+        if self.res_converters is None:
+            raise ProtocolError("Unexpected data row.")
         value_converters = self.res_converters
         if ushort_struct_unpack_from(buf)[0] != len(value_converters):
             raise ProtocolError("Invalid number of row values")
@@ -689,6 +725,8 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
     def handle_command_complete(self, msg_buf: memoryview) -> None:
         if msg_buf[-1] != 0:
             raise ProtocolError("Invalid command complete message")
+        if self._result is None:
+            raise ProtocolError("Unexpected close message.")
         self._result.append((
             self.res_fields, self.res_rows, decode(msg_buf[:-1])))
         self.res_fields = None
@@ -699,42 +737,45 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
         self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
-        if self._prepare_threshold:
-            # caching
-            cache_item = self._cache_item
+        cache_item = self._cache_item
+        if cache_item:
+            if self.cache_key is None:
+                raise ProtocolError("Unexpected ready for query.")
             if self._ex is not None:
-                if cache_item is not None and cache_item["prepared"]:
-                    # Error occurred. Mark item as error and remove cached
-                    # attributes
-                    cache_item["error"] = True
-                    del cache_item["res_fields"]
-                    del cache_item["res_converters"]
-            elif self._result and len(self._result) == 1:
-                if cache_item is None:
-                    # Succesful execution for new statement
+                if cache_item["prepared"]:
+                    cache_item.update(res_fields=None, res_converters=None)
+                    self._set_result([
+                        self._close_statement_msg(cache_item["name"]),
+                        b'S\x00\x00\x00\x04',
+                        ], False)
+                    return
+            elif (not cache_item["prepared"] and self._result
+                    and len(self._result) == 1):
+                # we have a non-prepared statement that is eligible for server
+                # side preparing
+                if cache_item["num_executed"] == 0:
+                    # new statement, add to cache
                     cache_len = len(self._cache)
                     if cache_len == self._cache_size:
                         # Cache is full. Remove old statement, reuse statement
-                        # name and mark statement name for closure
+                        # name and close old statement
                         old_item = self._cache.popitem(last=False)[1]
-                        stmt_name = old_item["name"]
+                        cache_item["name"] = old_item["name"]
                         if old_item["prepared"]:
-                            # Mark for closure
-                            self._close_stmt = stmt_name
-                    else:
-                        # Create new statement name
-                        stmt_name = f"_pagio_{cache_len:03}".encode()
-                    # Add cache item for statement
-                    self._cache[self.cache_key] = {
-                        "prepared": False,
-                        "num_executed": 1,
-                        "name": stmt_name,
-                        "error": False,
-                    }
-                elif not cache_item["prepared"]:
-                    # Succesful execution for existing statement. Update
-                    # execution counter.
-                    cache_item["num_executed"] += 1
+                            # Close old statement
+                            self._set_result([
+                                self._close_statement_msg(old_item["name"]),
+                                b'S\x00\x00\x00\x04'
+                                ], False)
+                            return
+                    elif not cache_item["name"]:
+                        # generate cache name
+                        cache_item["name"] = f"_pagio_{cache_len:03}".encode()
+                    # add statement to cache
+                    self._cache[self.cache_key] = cache_item
+                else:
+                    self._cache.move_to_end(self.cache_key)
+                cache_item["num_executed"] += 1
             self._cache_item = None
             self.cache_key = None
 
@@ -742,15 +783,5 @@ class PyBasePGProtocol(_BasePGProtocol, ABC):
             self._set_exception(self._ex)
             self._ex = None
         else:
-            self._set_result(self._result)
+            self._set_result(self._result, True)
         self._result = None
-
-
-try:
-    from ._pagio import CBasePGProtocol
-
-    class BasePGProtocol(CBasePGProtocol, _BasePGProtocol):
-        pass
-
-except ImportError:
-    BasePGProtocol = PyBasePGProtocol

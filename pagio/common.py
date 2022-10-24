@@ -154,7 +154,7 @@ class Result:
 
 class ResultSet:
 
-    def __init__(self, results) -> None:
+    def __init__(self, results: List[Tuple[Optional[List[FieldInfo]], Optional[List[Tuple[Any, ...]]], str]]) -> None:
         self._results: List[Result] = [
             Result(*res_args) for res_args in results]
         self._result_index = 0
@@ -191,12 +191,12 @@ class ResultSet:
         return self._current().command_tag
 
     @property
-    def fields(self) -> Optional[List[str]]:
+    def fields(self) -> Optional[List[FieldInfo]]:
         return self._current().fields
 
     @property
     def rows(self) -> Optional[List[Tuple[Any, ...]]]:
         return self._current().rows
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         return bool(self._results)

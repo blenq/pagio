@@ -1,14 +1,18 @@
 from asyncio import (
-    BufferedProtocol, Transport, shield, Future, get_running_loop)
-from typing import Optional, Any, Union, cast, Sequence, List
+    BufferedProtocol, Transport, shield, Future, get_running_loop, BaseTransport)
+from typing import Optional, Any, Union, cast, List, Tuple
 
 from .base_protocol import (
-    BasePGProtocol, PyBasePGProtocol, ProtocolStatus, Format,
-    TransactionStatus)
+    _BasePGProtocol,
+    # BasePGProtocol,
+    PyBasePGProtocol, Format,
+    TransactionStatus, _STATUS_CONNECTED, _STATUS_CLOSED,
+    _STATUS_READY_FOR_QUERY)
 from .common import ResultSet, CachedQueryExpired
 
 
-class _AsyncPGProtocol:
+class _AsyncPGProtocol(_BasePGProtocol):
+    """ Async specific functionality of PG protocol """
 
     _transport: Transport
 
@@ -18,13 +22,12 @@ class _AsyncPGProtocol:
         self._write_fut: Optional[Future[None]] = None
         self._loop = get_running_loop()
 
-    def connection_made(  # type: ignore[override]
-            self, transport: Transport) -> None:
-        self._transport = transport
-        self._status = ProtocolStatus.CONNECTED
+    def connection_made(self, transport: BaseTransport) -> None:
+        self._transport = cast(Transport, transport)
+        self._status = _STATUS_CONNECTED
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
-        self._status = ProtocolStatus.CLOSED
+        self._status = _STATUS_CLOSED
         if exc is not None:
             self._set_exception(exc)
 
@@ -34,11 +37,6 @@ class _AsyncPGProtocol:
     def resume_writing(self) -> None:
         if self._write_fut is not None:
             self._write_fut.set_result(None)
-
-    async def write(self, data: bytes) -> None:
-        if self._write_fut is not None:
-            await shield(self._write_fut)
-        self._transport.write(data)
 
     async def writelines(self, data: List[bytes]) -> None:
         if self._write_fut is not None:
@@ -60,27 +58,30 @@ class _AsyncPGProtocol:
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
 
-        while isinstance(message, bytes):
+        await self.talk(message)
+
+    async def talk(self, message: List[bytes]) -> Any:
+        final = False
+        while not final:
             self._read_fut = self._loop.create_future()
-            await self.write(message)
-            message = await self._read_fut
+            await self.writelines(message)
+            message, final = await self._read_fut
+        return message
 
     async def _execute(
             self,
             sql: str,
-            parameters: Sequence[Any],
+            parameters: Tuple[Any, ...],
             result_format: Format,
     ) -> ResultSet:
         msg = self.execute_message(
             sql, parameters, result_format=result_format)
-        self._read_fut = self._loop.create_future()
-        await self.writelines(msg)
-        return ResultSet(await self._read_fut)
+        return ResultSet(await self.talk(msg))
 
     async def execute(
             self,
             sql: str,
-            parameters: Sequence[Any],
+            parameters: Tuple[Any, ...],
             result_format: Format,
     ) -> ResultSet:
         try:
@@ -93,26 +94,32 @@ class _AsyncPGProtocol:
             raise
 
     async def close(self) -> None:
-        if self._status == ProtocolStatus.READY_FOR_QUERY:
-            await self.write(self.terminate_message())
+        if self._status == _STATUS_READY_FOR_QUERY:
+            await self.writelines([self.terminate_message()])
         self._close()
 
     def _close(self) -> None:
         self._transport.close()
-        self._status = ProtocolStatus.CLOSED
+        self._status = _STATUS_CLOSED
 
     def _set_exception(self, ex: BaseException) -> None:
         if self._read_fut and not self._read_fut.done():
             self._read_fut.set_exception(ex)
 
-    def _set_result(self, result) -> None:
+    def _set_result(self, result: Any, final: bool) -> None:
         if self._read_fut and not self._read_fut.done():
-            self._read_fut.set_result(result)
+            self._read_fut.set_result((result, final))
 
 
-class AsyncPGProtocol(_AsyncPGProtocol, BasePGProtocol, BufferedProtocol):
-    pass
+class PyAsyncPGProtocol(PyBasePGProtocol, _AsyncPGProtocol, BufferedProtocol):
+    """ Pure Python async version of PG protocol """
 
+try:
+    from ._pagio import CBasePGProtocol
 
-class PyAsyncPGProtocol(_AsyncPGProtocol, PyBasePGProtocol, BufferedProtocol):
-    pass
+    class AsyncPGProtocol(CBasePGProtocol, _AsyncPGProtocol, BufferedProtocol):
+        """ C accelerated async version of PG protocol """
+
+except ImportError:
+    # Fallback to Pure Python
+    AsyncPGProtocol = PyAsyncPGProtocol  # type: ignore

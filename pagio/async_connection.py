@@ -1,7 +1,7 @@
 import asyncio
 from ssl import SSLContext
 from types import TracebackType
-from typing import Optional, Any, Generator, Type, Sequence
+from typing import Optional, Any, Generator, Type, Tuple
 
 from .async_protocol import AsyncPGProtocol
 from .base_protocol import Format
@@ -59,7 +59,7 @@ class AsyncConnection(BaseConnection):
     async def execute(
             self,
             sql: str,
-            *parameters,
+            *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
     ) -> ResultSet:
         return await self._protocol.execute(

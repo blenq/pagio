@@ -1,19 +1,21 @@
 """ Synchronous version of Protocol """
 
 import socket
-import sys
-from typing import Optional, Union, Any, cast, Sequence, List
+from typing import Optional, Union, Any, cast, Sequence, List, Tuple
 
 from .base_protocol import (
-    BasePGProtocol, ProtocolStatus, Format, PyBasePGProtocol, TransactionStatus)
+    _BasePGProtocol,
+    # BasePGProtocol,
+    Format, PyBasePGProtocol, _STATUS_READY_FOR_QUERY,
+    TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED)
 from .common import ResultSet, CachedQueryExpired
 
 
 NO_RESULT = object()
 
 
-class _PGProtocol:
-    """ Synchronous Protocol """
+class _PGProtocol(_BasePGProtocol):
+    """ Synchronous specific functionality of PG protocol """
 
     _prepare_threshold: int
     _cache_size: int
@@ -22,7 +24,14 @@ class _PGProtocol:
         super().__init__()
         self._sock = sock
         self._sync_result = NO_RESULT
-        self._status = ProtocolStatus.CONNECTED
+        self._status = _STATUS_CONNECTED
+
+    def talk(self, message: List[bytes]) -> Any:
+        final = False
+        while not final:
+            self.writelines(message)
+            message, final = self.read()
+        return message
 
     def startup(
             self,
@@ -32,8 +41,8 @@ class _PGProtocol:
             password: Union[None, str, bytes],
             *,
             tz_name: Optional[str],
-            prepare_threshold,
-            cache_size,
+            prepare_threshold: int,
+            cache_size: int,
     ) -> None:
         """ Start up connection, including authentication """
 
@@ -41,9 +50,7 @@ class _PGProtocol:
             user, database, application_name, tz_name, password)
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
-        while isinstance(message, bytes):
-            self.write(message)
-            message = self.read()
+        self.talk(message)
 
     def write(self, data: bytes) -> None:
         """ Send data to the server """
@@ -77,18 +84,18 @@ class _PGProtocol:
     def _execute(
             self,
             sql: str,
-            parameters: Optional[Sequence[Any]],
+            parameters: Tuple[Any, ...],
             result_format: Format,
     ) -> ResultSet:
         """ Execute a query text and return the result """
-        self.writelines(
+        return ResultSet(self.talk(
             self.execute_message(sql, parameters, result_format=result_format))
-        return ResultSet(self.read())
+        )
 
     def execute(
             self,
             sql: str,
-            parameters: Optional[Sequence[Any]],
+            parameters: Tuple[Any, ...],
             result_format: Format,
     ) -> ResultSet:
         """ Execute a query text and return the result """
@@ -101,7 +108,7 @@ class _PGProtocol:
 
     def close(self) -> None:
         """ Closes the connection """
-        if self._status == ProtocolStatus.READY_FOR_QUERY:
+        if self.status == _STATUS_READY_FOR_QUERY:
             try:
                 self.write(self.terminate_message())
             except:
@@ -110,18 +117,25 @@ class _PGProtocol:
 
     def _close(self) -> None:
         self._sock.close()
-        self._status = ProtocolStatus.CLOSED
+        self._status = _STATUS_CLOSED
 
     def _set_exception(self, ex: BaseException) -> None:
         self._sync_result = ex
 
-    def _set_result(self, result) -> None:
-        self._sync_result = result
+    def _set_result(self, result: Any, final: bool) -> None:
+        self._sync_result = result, final
 
 
-class PGProtocol(_PGProtocol, BasePGProtocol):
-    pass
+class PyPGProtocol(PyBasePGProtocol, _PGProtocol):
+    """ Pure Python synchronous version of PG protocol """
 
 
-class PyPGProtocol(_PGProtocol, PyBasePGProtocol):
-    pass
+try:
+    from ._pagio import CBasePGProtocol
+
+    class PGProtocol(CBasePGProtocol, _PGProtocol):
+        """ C accelerated synchronous version of PG protocol """
+
+except ImportError:
+    # fallback to pure python
+    PGProtocol = PyPGProtocol  # type: ignore

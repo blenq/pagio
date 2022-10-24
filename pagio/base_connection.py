@@ -6,7 +6,7 @@ from ssl import SSLContext
 from typing import Optional, Any, Union
 import os
 
-from .base_protocol import BasePGProtocol, TransactionStatus, ProtocolStatus
+from .base_protocol import _BasePGProtocol, TransactionStatus, ProtocolStatus
 from .zoneinfo import ZoneInfo
 
 HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
@@ -28,7 +28,7 @@ def _from_env(value: Any, varname: str) -> Any:
 
 class BaseConnection:
 
-    _protocol: BasePGProtocol = None
+    _protocol: Optional[_BasePGProtocol] = None
 
     def __init__(
             self,

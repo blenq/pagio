@@ -3,7 +3,7 @@
 import socket
 from ssl import SSLContext
 from types import TracebackType
-from typing import Optional, Any, Type, Sequence
+from typing import Optional, Any, Type, Tuple
 
 from .base_protocol import Format
 from .base_connection import BaseConnection, SSLMode
@@ -62,7 +62,7 @@ class Connection(BaseConnection):
     def execute(
             self,
             sql: str,
-            *parameters,
+            *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
     ) -> ResultSet:
         """ Execute a query text and return the result """
