@@ -1,6 +1,7 @@
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
+from decimal import Decimal
 import enum
 from hashlib import md5
 from struct import Struct, unpack_from, pack
@@ -10,16 +11,20 @@ from typing import (
 
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
-    FieldInfo, CachedQueryExpired
+    FieldInfo, CachedQueryExpired, check_length_equal,
+    ushort_struct_unpack_from,
 )
 from .const import *
+from .network import (
+    txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
+    bin_cidr_to_python)
+from .numeric import bin_numeric_to_python, txt_numeric_to_python
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STANDARD_BUF_SIZE = 0x4000
 
 
 header_struct_unpack_from = Struct("!Bi").unpack_from
-ushort_struct_unpack_from = Struct('!H').unpack_from
 int2_struct = Struct('!h')
 int2_struct_unpack = int2_struct.unpack
 int_struct = Struct('!i')
@@ -44,13 +49,6 @@ field_desc_struct_unpack_from = field_desc_struct.unpack_from
 intint_struct = Struct('!ii')
 
 single_byte_struct_unpack = Struct('!B').unpack
-
-
-def check_length_equal(length: int, msg_buf: memoryview) -> None:
-    if len(msg_buf) != length:
-        raise ProtocolError(
-            f"Invalid length for message. Expected {length}, but got"
-            f"{len(msg_buf)}.")
 
 
 _STATUS_CLOSED = 0
@@ -163,7 +161,7 @@ DBConverter = Callable[[memoryview], Any]
 
 class _AbstractPGProtocol(ABC):
     @abstractmethod
-    def _set_result(self, result: Any, final: bool) -> None:
+    def _set_result(self, result: Any) -> None:
         ...
 
     @abstractmethod
@@ -265,7 +263,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
         self.user = user
         self.password = password
         self._status = _STATUS_STARTING_UP
-        return [message]
+        return message
 
     def terminate_message(self) -> bytes:
         self._status = _STATUS_CLOSING
@@ -356,7 +354,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             pw_len = len(password) + 1
             struct_fmt = f'!ci{pw_len}s'
             self._set_result(
-                [pack(struct_fmt, b'p', pw_len + 4, password)], False)
+                pack(struct_fmt, b'p', pw_len + 4, password))
         else:
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")
@@ -411,6 +409,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._prepare_threshold = 5
         self._cache_size = 100
         self.cache_key: Optional[CacheKey] = None
+        self._stmt_to_close: Optional[Dict[str, Any]] = None
 
         # reading buffers and counters
         self._bytes_read = 0
@@ -450,12 +449,15 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             FLOAT4OID: (float, bin_float4_to_python),
             FLOAT8OID: (float, bin_float8_to_python),
             BOOLOID: (text_bool_to_python, bin_bool_to_python),
+            NUMERICOID: (txt_numeric_to_python, bin_numeric_to_python),
             NAMEOID: (decode, decode),
             OIDOID: (int, bin_uint_to_python),
             CHAROID: (decode, decode),
             TEXTOID: (decode, decode),
             VARCHAROID: (decode, decode),
             BPCHAROID: (decode, decode),
+            INETOID: (txt_inet_to_python, bin_inet_to_python),
+            CIDROID: (txt_cidr_to_python, bin_cidr_to_python),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: int_to_pg,
@@ -572,6 +574,10 @@ class PyBasePGProtocol(_AbstractPGProtocol):
     ) -> List[bytes]:
         message = []
 
+        if self._stmt_to_close is not None:
+            message.append(
+                self._close_statement_msg(self._stmt_to_close["name"]))
+
         param_oids: Tuple[int]
         if parameters:
             param_oids, param_structs, param_vals, param_lens, param_fmts = zip(
@@ -587,26 +593,20 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         if self._prepare_threshold:
             cache_key: CacheKey = (sql, param_oids) if parameters else sql
             cache_item = self._cache.get(cache_key)
-            if cache_item:
-                # statement executed before, move to end of cache
-                # self._cache.move_to_end(cache_key)
+            if cache_item is not None:
+                # statement executed before
                 if cache_item["prepared"]:
                     # statement is prepared server side
-                    # Reuse server side statement and skip parsing
-                    prepared = True
-                    stmt_name = cache_item["name"]
+                    if (self._stmt_to_close is None or
+                            self._stmt_to_close["name"] != cache_item["name"]):
+                        # statement is prepared server side
+                        # Reuse server side statement and skip parsing
+                        prepared = True
+                        stmt_name = cache_item["name"]
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
                         # Using a non-empty statement name for reuse
                         stmt_name = cache_item["name"]
-            else:
-                cache_item = {
-                    "prepared": False,
-                    "num_executed": 0,
-                    "res_fields": None,
-                    "res_converters": None,
-                    "name": None,
-                }
 
         if (not parameters
                 and result_format in (Format.TEXT, Format.DEFAULT)
@@ -633,7 +633,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
 
         # Set up for results
-        if cache_item is not None:
+        if self._prepare_threshold:
             self.cache_key = cache_key
             self._cache_item = cache_item
             if prepared:
@@ -657,9 +657,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
     def handle_close_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
-        if self._cache_item is not None:
-            # Reset the statement
-            self._cache_item.update(num_executed=0, prepared=False)
+        if self._stmt_to_close is None:
+            raise ProtocolError("Unexpected close complete message.")
+
+        # Reset the statement
+        self._stmt_to_close.update(
+            prepared=False, num_executed=0, res_fields=None,
+            res_converters=None)
+        self._stmt_to_close = None
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
@@ -692,6 +697,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_rows = []
         self.res_converters = converters
         if self._cache_item is not None and self._cache_item["prepared"]:
+            # store field_info and converters in cache
             self._cache_item.update(
                 res_fields=res_fields, res_converters=converters)
 
@@ -733,55 +739,58 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_converters = None
         self.res_rows = None
 
+    def _handle_ready_cache(self):
+
+        cache_item = self._cache_item
+        if cache_item is None:
+            # Statement does not exist in cache
+            if self._ex is None and self._result and len(self._result) == 1:
+                # Successful execution, new item must be added to cache.
+                cache_len = len(self._cache)
+                if cache_len == self._cache_size:
+                    # Cache is full. Remove old statement, reuse statement
+                    # name and close old statement if prepared
+                    old_item = self._cache.popitem(last=False)[1]
+                    stmt_name = old_item["name"]
+                    if old_item["prepared"]:
+                        self._stmt_to_close = old_item
+                else:
+                    # Cache not full yet, generate statement name
+                    stmt_name = f"_pagio_{cache_len:03}".encode()
+                # Add new cache item
+                self._cache[self.cache_key] = {
+                    "prepared": False,
+                    "num_executed": 1,
+                    "res_fields": None,
+                    "res_converters": None,
+                    "name": stmt_name,
+                }
+        else:
+            # Statement is already in cache
+            if self._ex is None:
+                # Successful execution, move to recent end in cache and
+                # increment execution counter if not prepared yet
+                self._cache.move_to_end(self.cache_key)
+                if not cache_item["prepared"]:
+                    cache_item["num_executed"] += 1
+            else:
+                # Error occurred
+                if cache_item["prepared"]:
+                    # Statement is server side prepared, mark for closure
+                    self._stmt_to_close = cache_item
+            self._cache_item = None
+        self.cache_key = None
+
     def handle_ready_for_query(self, msg_buf: memoryview) -> None:
         self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
-        cache_item = self._cache_item
-        if cache_item:
-            if self.cache_key is None:
-                raise ProtocolError("Unexpected ready for query.")
-            if self._ex is not None:
-                if cache_item["prepared"]:
-                    cache_item.update(res_fields=None, res_converters=None)
-                    self._set_result([
-                        self._close_statement_msg(cache_item["name"]),
-                        b'S\x00\x00\x00\x04',
-                        ], False)
-                    return
-            elif (not cache_item["prepared"] and self._result
-                    and len(self._result) == 1):
-                # we have a non-prepared statement that is eligible for server
-                # side preparing
-                if cache_item["num_executed"] == 0:
-                    # new statement, add to cache
-                    cache_len = len(self._cache)
-                    if cache_len == self._cache_size:
-                        # Cache is full. Remove old statement, reuse statement
-                        # name and close old statement
-                        old_item = self._cache.popitem(last=False)[1]
-                        cache_item["name"] = old_item["name"]
-                        if old_item["prepared"]:
-                            # Close old statement
-                            self._set_result([
-                                self._close_statement_msg(old_item["name"]),
-                                b'S\x00\x00\x00\x04'
-                                ], False)
-                            return
-                    elif not cache_item["name"]:
-                        # generate cache name
-                        cache_item["name"] = f"_pagio_{cache_len:03}".encode()
-                    # add statement to cache
-                    self._cache[self.cache_key] = cache_item
-                else:
-                    self._cache.move_to_end(self.cache_key)
-                cache_item["num_executed"] += 1
-            self._cache_item = None
-            self.cache_key = None
+        if self._prepare_threshold:
+            self._handle_ready_cache()
 
         if self._ex is not None:
             self._set_exception(self._ex)
             self._ex = None
         else:
-            self._set_result(self._result, True)
+            self._set_result(self._result)
         self._result = None

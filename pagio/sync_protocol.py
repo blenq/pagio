@@ -1,12 +1,10 @@
 """ Synchronous version of Protocol """
 
 import socket
-from typing import Optional, Union, Any, cast, Sequence, List, Tuple
+from typing import Optional, Union, Any, List, Tuple
 
 from .base_protocol import (
-    _BasePGProtocol,
-    # BasePGProtocol,
-    Format, PyBasePGProtocol, _STATUS_READY_FOR_QUERY,
+    _BasePGProtocol, Format, PyBasePGProtocol, _STATUS_READY_FOR_QUERY,
     TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED)
 from .common import ResultSet, CachedQueryExpired
 
@@ -26,13 +24,6 @@ class _PGProtocol(_BasePGProtocol):
         self._sync_result = NO_RESULT
         self._status = _STATUS_CONNECTED
 
-    def talk(self, message: List[bytes]) -> Any:
-        final = False
-        while not final:
-            self.writelines(message)
-            message, final = self.read()
-        return message
-
     def startup(
             self,
             user: str,
@@ -50,7 +41,9 @@ class _PGProtocol(_BasePGProtocol):
             user, database, application_name, tz_name, password)
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
-        self.talk(message)
+        while isinstance(message, bytes):
+            self.write(message)
+            message = self.read()
 
     def write(self, data: bytes) -> None:
         """ Send data to the server """
@@ -88,9 +81,9 @@ class _PGProtocol(_BasePGProtocol):
             result_format: Format,
     ) -> ResultSet:
         """ Execute a query text and return the result """
-        return ResultSet(self.talk(
+        self.writelines(
             self.execute_message(sql, parameters, result_format=result_format))
-        )
+        return ResultSet(self.read())
 
     def execute(
             self,
@@ -122,8 +115,8 @@ class _PGProtocol(_BasePGProtocol):
     def _set_exception(self, ex: BaseException) -> None:
         self._sync_result = ex
 
-    def _set_result(self, result: Any, final: bool) -> None:
-        self._sync_result = result, final
+    def _set_result(self, result: Any) -> None:
+        self._sync_result = result
 
 
 class PyPGProtocol(PyBasePGProtocol, _PGProtocol):

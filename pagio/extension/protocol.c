@@ -3,6 +3,7 @@
 #include "stmt.h"
 #include "numeric.h"
 #include "utils.h"
+#include "network.h"
 
 #define _STATUS_CLOSED 0
 #define _STATUS_READY_FOR_QUERY 5
@@ -123,30 +124,6 @@ static inline int get_buf_size(PPObject *self) {
 }
 
 
-static void
-PP_dealloc(PPObject *self)
-{
-    Py_CLEAR(self->buf);
-    Py_CLEAR(self->res_rows);
-    Py_CLEAR(self->res_fields);
-    Py_CLEAR(self->result);
-    Py_CLEAR(self->ex);
-    Py_CLEAR(self->cache_key);
-    if (self->res_converters) {
-        if (!self->cache_item || !self->cache_item->prepared) {
-            PyMem_Free(self->res_converters);
-        }
-    }
-    Py_CLEAR(self->cache_item);
-    Py_CLEAR(self->stmt_cache);
-    if (self->buf_ptr != self->standard_buf_ptr) {
-        PyMem_Free(self->buf_ptr);
-    }
-    PyMem_Free(self->standard_buf_ptr);
-    Py_TYPE(self)->tp_free((PyObject *) self);
-}
-
-
 static PyObject *
 PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
@@ -178,6 +155,30 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     }
     self->status = _STATUS_CLOSED;
     return (PyObject *) self;
+}
+
+
+static void
+PP_dealloc(PPObject *self)
+{
+    Py_CLEAR(self->buf);
+    Py_CLEAR(self->res_rows);
+    Py_CLEAR(self->res_fields);
+    Py_CLEAR(self->result);
+    Py_CLEAR(self->ex);
+    Py_CLEAR(self->cache_key);
+    if (self->res_converters) {
+        if (!self->cache_item || !PagioST_PREPARED(self->cache_item)) {
+            PyMem_Free(self->res_converters);
+        }
+    }
+    Py_CLEAR(self->cache_item);
+    Py_CLEAR(self->stmt_cache);
+    if (self->buf_ptr != self->standard_buf_ptr) {
+        PyMem_Free(self->buf_ptr);
+    }
+    PyMem_Free(self->standard_buf_ptr);
+    Py_TYPE(self)->tp_free((PyObject *) self);
 }
 
 
@@ -215,6 +216,10 @@ get_text_converter(unsigned int type_oid)
     case INT8OID:
     case OIDOID:
         return convert_pg_int_text;
+    case INETOID:
+        return convert_pg_inet_text;
+    case CIDROID:
+        return convert_pg_cidr_text;
     default:
         return convert_pg_text;
     }
@@ -251,6 +256,10 @@ get_binary_converter(unsigned int type_oid)
         return convert_pg_int8_bin;
     case OIDOID:
         return convert_pg_uint4_bin;
+    case INETOID:
+        return convert_pg_inet_bin;
+    case CIDROID:
+        return convert_pg_cidr_bin;
     default:
         return convert_pg_binary;
     }
@@ -386,10 +395,10 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
     }
     self->res_rows = res_rows;
     self->res_fields = res_fields;
-    if (self->cache_item && self->cache_item->prepared) {
+    if (self->cache_item && PagioST_PREPARED(self->cache_item)) {
         Py_INCREF(res_fields);
-        self->cache_item->res_fields = res_fields;
-        self->cache_item->res_converters = self->res_converters;
+        PagioST_SET_RES_FIELDS(self->cache_item, res_fields);
+        PagioST_SET_RES_CONVERTERS(self->cache_item, self->res_converters);
     }
 
     return 0;
@@ -474,17 +483,16 @@ end:
 static int
 PPhandle_close_complete(PPObject *self, char **buf, char *end) {
     if (*buf != end) {
-        PyErr_SetString(PyExc_ValueError, "Invalid close complete message.");
+        PyErr_SetString(PyExc_ValueError, "Invalid Close Complete message.");
         return -1;
     }
-    if (self->stmt_to_close) {
-        self->stmt_to_close = 0;
+    if (self->stmt_to_close == NULL) {
+        PyErr_SetString(
+            PyExc_ValueError, "Unexpected Close Complete message.");
+        return -1;
     }
-    else if (self->cache_item && self->cache_item->error) {
-        self->cache_item->num_executed = 0;
-        self->cache_item->prepared = 0;
-        self->cache_item->error = 0;
-    }
+    PagioST_RESET(self->stmt_to_close);
+    Py_CLEAR(self->stmt_to_close);
     return 0;
 }
 
@@ -496,8 +504,8 @@ PPhandle_parse_complete(PPObject *self, char **buf, char *end) {
         return -1;
     }
     if (self->cache_item &&
-            self->cache_item->num_executed == self->prepare_threshold) {
-        self->cache_item->prepared = 1;
+            PagioST_NUM_EXECUTED(self->cache_item) == self->prepare_threshold) {
+        PagioST_SET_PREPARED(self->cache_item, 1);
     }
     return 0;
 }
@@ -518,7 +526,7 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
     PyObject *tag = NULL, *result_set = NULL, *item;
 
     if (self->res_converters) {
-        if (!self->cache_item || !self->cache_item->prepared) {
+        if (!self->cache_item || !PagioST_PREPARED(self->cache_item)) {
             // if the statement is prepared, the converters are owned by the
             // cache item
             PyMem_Free(self->res_converters);
@@ -534,33 +542,110 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
     item = self->res_fields ? self->res_fields: Py_None;
     Py_INCREF(item);
     PyTuple_SET_ITEM(result_set, 0, item);
+    Py_CLEAR(self->res_fields);
 
     item = self->res_rows ? self->res_rows: Py_None;
     Py_INCREF(item);
     PyTuple_SET_ITEM(result_set, 1, item);
-
-    Py_CLEAR(self->res_fields);
     Py_CLEAR(self->res_rows);
 
     tag = read_string(buf, end);
     if (tag == NULL) {
-        goto error;
+        Py_DECREF(result_set);
+        return -1;
     }
-
     PyTuple_SET_ITEM(result_set, 2, tag);
 
     if (PyList_Append(self->result, result_set) == -1) {
-        goto error;
+        Py_DECREF(result_set);
+        return -1;
     }
     Py_DECREF(result_set);
     return 0;
-error:
-    Py_DECREF(result_set);
-    return -1;
 }
 
 
 static PyObject *set_result;
+
+
+static int
+ready_cache(PPObject *self) {
+
+    if (self->cache_item) {
+        if (self->ex) {
+            if (PagioST_PREPARED(self->cache_item)) {
+                self->stmt_to_close = self->cache_item;
+                Py_INCREF(self->stmt_to_close);
+            }
+        }
+        else {
+            // move to most recent
+            if (_PyDict_DelItem_KnownHash(
+                    self->stmt_cache, self->cache_key, self->cache_key_hash) == -1) {
+                return -1;
+            }
+            if (_PyDict_SetItem_KnownHash(
+                    self->stmt_cache, self->cache_key, self->cache_item, self->cache_key_hash
+                    ) == -1) {
+                return -1;
+            }
+            if (!PagioST_PREPARED(self->cache_item)) {
+                PagioST_INC_EXECUTED(self->cache_item);
+            }
+        }
+    }
+    else {
+        if (self->ex == NULL && self->result &&
+                PyList_GET_SIZE(self->result) == 1) {
+            Py_ssize_t cache_size;
+            cache_size = PyDict_Size(self->stmt_cache);
+            int stmt_index;
+            PyObject *new_stmt;
+
+            if (cache_size == self->cache_size) {
+                Py_ssize_t ppos = 0;
+                PyObject *old_key, *old_cache_item;
+
+                // remove item from cache
+                PyDict_Next(self->stmt_cache, &ppos, &old_key, &old_cache_item);
+                Py_INCREF(old_key);
+                Py_INCREF(old_cache_item);
+                stmt_index = PagioST_INDEX(old_cache_item);
+                int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
+                Py_DECREF(old_key);
+                if (del_ret == -1) {
+                    Py_DECREF(old_cache_item);
+                    return -1;
+                }
+                if (PagioST_PREPARED(old_cache_item)) {
+                    self->stmt_to_close = old_cache_item;
+                }
+                else {
+                    Py_DECREF(old_cache_item);
+                }
+            }
+            else {
+                stmt_index = cache_size + 1;
+            }
+            new_stmt = PagioST_new(stmt_index);
+            if (new_stmt == NULL) {
+                return -1;
+            }
+            int set_ret = _PyDict_SetItem_KnownHash(
+                self->stmt_cache, self->cache_key, new_stmt,
+                self->cache_key_hash);
+
+            Py_DECREF(new_stmt);
+            if (set_ret == -1) {
+                return -1;
+            }
+        }
+    }
+    Py_CLEAR(self->cache_item);
+    Py_CLEAR(self->cache_key);
+    self->cache_key_hash = -1;
+    return 0;
+}
 
 
 static int
@@ -577,52 +662,8 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     self->status = _STATUS_READY_FOR_QUERY;
 
     if (self->prepare_threshold) {
-        if (self->ex) {
-            if (self->cache_item && self->cache_item->prepared) {
-                self->cache_item->error = 1;
-                Py_CLEAR(self->cache_item->res_fields);
-                PyMem_Free(self->cache_item->res_converters);
-                self->cache_item->res_converters = NULL;
-            }
-        }
-        else if (self->result && PyList_GET_SIZE(self->result) == 1) {
-            int stmt_index;
-            if (self->cache_item == NULL) {
-                Py_ssize_t cache_size;
-                cache_size = PyDict_Size(self->stmt_cache);
-
-                if (cache_size == self->cache_size) {
-                    Py_ssize_t ppos = 0;
-                    PyObject *old_key;
-                    PagioSTObject *old_cache_item;
-                    PyDict_Next(self->stmt_cache, &ppos, &old_key, (PyObject **)&old_cache_item);
-                    stmt_index = old_cache_item->index;
-                    if (old_cache_item->prepared) {
-                        self->stmt_to_close = stmt_index;
-                    }
-                    Py_INCREF(old_key);
-                    int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
-                    Py_DECREF(old_key);
-                    if (del_ret == -1) {
-                        return -1;
-                    }
-                }
-                else {
-                    stmt_index = cache_size + 1;
-                }
-                PagioSTObject *new_cache_item = (PagioSTObject *)PagioST_new(stmt_index, 1);
-                if (new_cache_item == NULL) {
-                    return -1;
-                }
-                if (PyDict_SetItem(
-                        self->stmt_cache, self->cache_key, (PyObject *)new_cache_item
-                        ) == -1) {
-                    return -1;
-                }
-            }
-            else if (!self->cache_item->prepared) {
-                self->cache_item->num_executed += 1;
-            }
+        if (ready_cache(self) == -1) {
+            return -1;
         }
     }
 
@@ -633,11 +674,9 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     else {
         PyObject *result = self->result ? self->result : Py_None;
         ret = PyObject_CallMethodObjArgs(
-            (PyObject *)self, set_result, result, Py_True, NULL);
+            (PyObject *)self, set_result, result, NULL);
     }
     Py_CLEAR(self->result);
-    Py_CLEAR(self->cache_item);
-    Py_CLEAR(self->cache_key);
     if (ret == NULL) {
         return -1;
     }
@@ -677,7 +716,7 @@ PPhandle_message(PPObject *self, char *buf) {
         break;
     case 'E':
         if (self->res_converters) {
-            if (!self->cache_item || !self->cache_item->prepared) {
+            if (!self->cache_item || !PagioST_PREPARED(self->cache_item)) {
                 // if the statement is prepared, the converters are owned by the
                 // cache item
                 PyMem_Free(self->res_converters);
@@ -807,7 +846,7 @@ fill_param_info(
 
 static void
 clean_param_info(ParamInfo *param_info, Py_ssize_t num_params) {
-    int i;
+    Py_ssize_t i;
 
     for (i = 0; i < num_params; i++) {
         ParamInfo *p_info = param_info + i;
@@ -846,22 +885,22 @@ write_string(char **buf, const char *val, int val_len) {
 }
 
 
-static int
-append_close_message(PyObject *message, int stmt_index) {
+static PyObject *
+close_message(int stmt_index) {
     PyObject *msg;
-    int stmt_name_len, success = 0, msg_len;
+    int stmt_name_len, msg_len;
     char *buf, stmt_name[11];
 
     if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
         PyErr_SetString(PyExc_ValueError, "Error during string formatting.");
-        return -1;
+        return NULL;
     }
     stmt_name_len = (int)strlen(stmt_name);
     msg_len = stmt_name_len + 6;
 
     msg = PyBytes_FromStringAndSize(NULL, msg_len + 1);
     if (msg == NULL) {
-        return -1;
+        return NULL;
     }
     // Close:
     //      'C' (1)
@@ -874,11 +913,7 @@ append_close_message(PyObject *message, int stmt_index) {
     buf++[0] = 'S';
     write_string(&buf, stmt_name, stmt_name_len + 1);
 
-    if (PyList_Append(message, msg) == -1) {
-        success = -1;
-    }
-    Py_DECREF(msg);
-    return success;
+    return msg;
 }
 
 
@@ -892,25 +927,21 @@ fill_params(
 {
     Py_ssize_t num_params, i;
 
-    *param_vals_len = 0;
 
+    *param_vals_len = 0;
     num_params = PyTuple_GET_SIZE(params);
-    if (num_params) {
-        *param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
-        if (*param_info == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        *oids = PyMem_Calloc(num_params, sizeof(unsigned int));
-        if (*oids == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        *p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
-        if (*p_formats == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
+    if (num_params == 0) {
+        *param_info = NULL;
+        *oids = NULL;
+        *p_formats = NULL;
+        return 0;
+    }
+    *param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
+    *oids = PyMem_Calloc(num_params, sizeof(unsigned int));
+    *p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
+    if (*param_info == NULL || *oids == NULL || *p_formats == NULL) {
+        PyErr_NoMemory();
+        return -1;
     }
     for (i = 0; i < num_params; i++) {
         ParamInfo *p_info = *param_info + i;
@@ -964,80 +995,66 @@ get_cache_key(PyObject *sql, unsigned int *oids, Py_ssize_t num_params) {
 static int
 lookup_cache(
     PPObject *self,
-    PyObject *message,
     PyObject *sql,
     unsigned int *oids,
     Py_ssize_t num_params,
-    PyObject **cache_key,
-    PagioSTObject **cache_item,
     int *prepared,
     int *index)
 {
+    Py_hash_t cache_key_hash;
+    *index = 0;
+    *prepared = 0;
+
     if (self->prepare_threshold == 0) {
         // Caching disabled
         return 0;
     }
 
-    Py_hash_t cache_key_hash;
-    PagioSTObject *_cache_item = NULL;
-    PyObject *_cache_key;
-    int _prepared = 0, _index = 0;
-
-    _cache_key = get_cache_key(sql, oids, num_params);
-    if (_cache_key == NULL) {
+    if (self->cache_key) {
+        PyErr_SetString(PyExc_ValueError, "Cache key should not be set.");
         return -1;
     }
 
-    cache_key_hash = PyObject_Hash(_cache_key);
+    self->cache_key = get_cache_key(sql, oids, num_params);
+    if (self->cache_key == NULL) {
+        return -1;
+    }
+
+    cache_key_hash = PyObject_Hash(self->cache_key);
     if (cache_key_hash == -1) {
         goto error;
     }
-    _cache_item = (PagioSTObject *)_PyDict_GetItem_KnownHash(
-        self->stmt_cache, _cache_key, cache_key_hash);
-    if (_cache_item == NULL) {
+    self->cache_key_hash = cache_key_hash;
+    self->cache_item = _PyDict_GetItem_KnownHash(
+        self->stmt_cache, self->cache_key, cache_key_hash);
+    if (self->cache_item == NULL) {
         if (PyErr_Occurred()) {
             goto error;
         }
     }
     else {
         // cache_item is borrowed, so increment refcount
-        Py_INCREF(_cache_item);
-
-        // Move to end by deleting and inserting again
-        if (_PyDict_DelItem_KnownHash(
-                self->stmt_cache, _cache_key, cache_key_hash) == -1) {
-            goto error;
-        }
-        if (_PyDict_SetItem_KnownHash(
-                self->stmt_cache, _cache_key, (PyObject *)_cache_item, cache_key_hash
-                ) == -1) {
-            goto error;
-        }
-        if (_cache_item->prepared) {
-            if (_cache_item->error) {
-                if (append_close_message(message, _cache_item->index) == -1) {
-                    goto error;
-                }
-            }
-            else {
-                _prepared = 1;
-                _index = _cache_item->index;
+        Py_INCREF(self->cache_item);
+        if (PagioST_PREPARED(self->cache_item)) {
+            // We have a server side prepared statement
+            if (self->stmt_to_close == NULL ||
+                    self->stmt_to_close != self->cache_item) {
+                // The prepared statement is not on the nomination for closure,
+                // reuse it
+                *prepared = 1;
+                *index = PagioST_INDEX(self->cache_item);
             }
         }
-        else {
-            if (_cache_item->num_executed == self->prepare_threshold) {
-                _index = _cache_item->index;
-            }
+        else if (PagioST_NUM_EXECUTED(self->cache_item) == self->prepare_threshold) {
+            // Not prepared server-side yet, but it reached the threshold.
+            // Set the index to prepare server side
+            *index = PagioST_INDEX(self->cache_item);
         }
     }
-    *cache_key = _cache_key;
-    *cache_item = _cache_item;
-    *prepared = _prepared;
-    *index = _index;
     return 0;
 error:
-    Py_DECREF(_cache_key);
-    Py_XDECREF(_cache_item);
+    Py_DECREF(self->cache_key);
+    Py_CLEAR(self->cache_item);
     return -1;
 }
 
@@ -1253,29 +1270,41 @@ append_exec_sync_message(PyObject *message)
 
 static int
 _PPexecute_message(
-    PPObject *self, PyObject *message, PyObject *sql, PyObject *params, int result_format)
+    PPObject *self,
+    PyObject *message,
+    PyObject *sql,
+    PyObject *params,
+    int result_format)
 {
-    ParamInfo *param_info = NULL;
-    unsigned int *oids = NULL;
-    unsigned short *p_formats = NULL;
-    PyObject *cache_key = NULL;
-    PagioSTObject *cache_item = NULL;
-    int prepared = 0;
-    int index = 0;
+    ParamInfo *param_info;
+    unsigned int *oids;
+    unsigned short *p_formats;
+    int prepared;
+    int index;
     int ret = -1;
-    int param_vals_len;
+    int param_vals_len = 0;
 
     if (self->stmt_to_close) {
-        if (append_close_message(message, self->stmt_to_close) == -1) {
-            goto end;
+        PyObject *close_msg;
+        int close_ret;
+
+        close_msg = close_message(PagioST_INDEX(self->stmt_to_close));
+        if (close_msg == NULL) {
+            return -1;
+        }
+        close_ret = PyList_Append(message, close_msg);
+        Py_DECREF(close_msg);
+        if (close_ret == -1) {
+            return -1;
         }
     }
-    if (fill_params(params, &param_info, &oids, &p_formats, &param_vals_len) == -1) {
+
+    if (fill_params(
+            params, &param_info, &oids, &p_formats, &param_vals_len) == -1) {
         goto end;
     }
     if (lookup_cache(
-            self, message, sql, oids, PyTuple_GET_SIZE(params), &cache_key,
-            &cache_item, &prepared, &index) == -1) {
+            self, sql, oids, PyTuple_GET_SIZE(params), &prepared, &index) == -1) {
         goto end;
     }
 
@@ -1301,6 +1330,7 @@ _PPexecute_message(
                 ) == -1) {
             goto end;
         }
+        clean_param_info(param_info, PyTuple_GET_SIZE(params));
 
         if (!prepared) {
             if (append_desc_message(message) == -1) {
@@ -1320,33 +1350,25 @@ _PPexecute_message(
     if (self->prepare_threshold) {
         if (prepared) {
             PyObject *res_rows = NULL;
-            if (cache_item->res_fields) {
+            if (PagioST_RES_FIELDS(self->cache_item)) {
                 res_rows = PyList_New(0);
                 if (res_rows == NULL) {
                     Py_CLEAR(message);
                     goto end;
                 }
             }
-            self->res_fields = cache_item->res_fields;
-            Py_XINCREF(self->res_fields);
-            self->res_converters = cache_item->res_converters;
-            Py_XINCREF(self->res_fields);
             self->res_rows = res_rows;
+            self->res_fields = PagioST_RES_FIELDS(self->cache_item) ;
+            Py_XINCREF(self->res_fields);
+            self->res_converters = PagioST_RES_CONVERTERS(self->cache_item);
+            Py_XINCREF(self->res_fields);
         }
-        Py_INCREF(cache_key);
-        self->cache_key = cache_key;
-        Py_XINCREF(cache_item);
-        self->cache_item = cache_item;
     }
     self->status = _STATUS_EXECUTING;
     ret = 0;
-
 end:
-    clean_param_info(param_info, PyTuple_GET_SIZE(params));
     PyMem_Free(oids);
     PyMem_Free(p_formats);
-    Py_XDECREF(cache_key);
-    Py_XDECREF(cache_item);
     return ret;
 }
 
@@ -1444,6 +1466,10 @@ PyMODINIT_FUNC
 PyInit__pagio(void)
 {
     PyObject *m;
+
+    if (init_network() == -1) {
+        return NULL;
+    }
 
     if (PagioFieldInfo_Init() == -1) {
         return NULL;

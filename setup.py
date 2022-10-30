@@ -9,6 +9,7 @@ pagio_ext = Extension(
         'pagio/extension/numeric.c',
         'pagio/extension/utils.c',
         'pagio/extension/field_info.c',
+        'pagio/extension/network.c',
     ],
     depends=[
         'pagio/extension/pagio.h',
@@ -18,6 +19,7 @@ pagio_ext = Extension(
         'pagio/extension/numeric.h',
         'pagio/extension/utils.h',
         'pagio/extension/field_info.h',
+        'pagio/extension/network.h',
     ],
 )
 

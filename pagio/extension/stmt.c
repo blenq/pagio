@@ -23,13 +23,13 @@ PyTypeObject PagioST_Type = {
 
 
 PyObject *
-PagioST_new(int index, int num_executed)
+PagioST_new(int index)
 {
     PagioSTObject *self;
     self = (PagioSTObject *) PagioST_Type.tp_alloc(&PagioST_Type, 0);
     if (self != NULL) {
         self->index = index;
-        self->num_executed = num_executed;
+        self->num_executed = 1;
     }
     return (PyObject *)self;
 }

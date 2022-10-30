@@ -114,6 +114,7 @@ class ConnCase(IsolatedAsyncioTestCase):
                await cn.execute(f"SELECT {i}")
            res = await cn.execute("SELECT COUNT(*) FROM pg_prepared_statements")
            self.assertEqual(res.rows[0][0], 0)
+           await cn.execute(f"SELECT 100")
 
     async def test_cache_error(self):
         async with await AsyncConnection(
@@ -141,7 +142,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             res = await cn.execute("SELECT 12 / $1 AS val", 3)
             self.assertEqual(res.rows[0], (4,))
 
-            # executed twice, so should be prepared now
+            # executed twice, so should be prepared again
             res = await cn.execute(
                 "SELECT COUNT(*) AS num2 FROM pg_prepared_statements")
             self.assertEqual(res.rows[0][0], 1)

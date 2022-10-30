@@ -2,7 +2,11 @@
 
 from collections import namedtuple
 import enum
+from struct import Struct
 from typing import Tuple, Any, Optional, Union, List, Iterator
+
+
+ushort_struct_unpack_from = Struct('!H').unpack_from
 
 
 class Severity(enum.Enum):
@@ -200,3 +204,10 @@ class ResultSet:
 
     def __bool__(self) -> bool:
         return bool(self._results)
+
+
+def check_length_equal(length: int, msg_buf: memoryview) -> None:
+    if len(msg_buf) != length:
+        raise ProtocolError(
+            f"Invalid length for message. Expected {length}, but got"
+            f"{len(msg_buf)}.")

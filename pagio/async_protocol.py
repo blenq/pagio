@@ -38,6 +38,11 @@ class _AsyncPGProtocol(_BasePGProtocol):
         if self._write_fut is not None:
             self._write_fut.set_result(None)
 
+    async def write(self, data: bytes) -> None:
+        if self._write_fut is not None:
+            await shield(self._write_fut)
+        self._transport.write(data)
+
     async def writelines(self, data: List[bytes]) -> None:
         if self._write_fut is not None:
             await shield(self._write_fut)
@@ -58,15 +63,10 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
 
-        await self.talk(message)
-
-    async def talk(self, message: List[bytes]) -> Any:
-        final = False
-        while not final:
+        while isinstance(message, bytes):
             self._read_fut = self._loop.create_future()
-            await self.writelines(message)
-            message, final = await self._read_fut
-        return message
+            await self.write(message)
+            message = await self._read_fut
 
     async def _execute(
             self,
@@ -76,7 +76,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
     ) -> ResultSet:
         msg = self.execute_message(
             sql, parameters, result_format=result_format)
-        return ResultSet(await self.talk(msg))
+        self._read_fut = self._loop.create_future()
+        await self.writelines(msg)
+        return ResultSet(await self._read_fut)
 
     async def execute(
             self,
@@ -106,9 +108,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
         if self._read_fut and not self._read_fut.done():
             self._read_fut.set_exception(ex)
 
-    def _set_result(self, result: Any, final: bool) -> None:
+    def _set_result(self, result: Any) -> None:
         if self._read_fut and not self._read_fut.done():
-            self._read_fut.set_result((result, final))
+            self._read_fut.set_result(result)
 
 
 class PyAsyncPGProtocol(PyBasePGProtocol, _AsyncPGProtocol, BufferedProtocol):
