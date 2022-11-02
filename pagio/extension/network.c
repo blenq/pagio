@@ -8,34 +8,18 @@ static PyObject *IPv4Network;
 static PyObject *IPv6Network;
 static PyObject *ip_network;
 
-static PyObject *
-convert_pg_ip_text(
-    char *buf, int len, PyObject *IPv4Class, PyObject *IPv6Class)
-{
-	PyObject *inet_cls;
-
-	if (memchr(buf, '.', len) == NULL)
-	{
-		inet_cls = IPv4Class;
-	}
-	else
-	{
-		inet_cls = IPv6Class;
-	}
-	return PyObject_CallFunction(inet_cls, "s#", buf, len);
-}
 
 PyObject *
 convert_pg_inet_text(PPObject *self, char *buf, int len)
 {
-    return convert_pg_ip_text(buf, len, IPv4Interface, IPv6Interface);
+    return PyObject_CallFunction(ip_interface, "s#", buf, len);
 }
 
 
 PyObject *
 convert_pg_cidr_text(PPObject *self, char *buf, int len)
 {
-    return convert_pg_ip_text(buf, len, IPv4Network, IPv6Network);
+    return PyObject_CallFunction(ip_network, "s#", buf, len);
 }
 
 

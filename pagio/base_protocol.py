@@ -12,13 +12,15 @@ from typing import (
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct_unpack_from,
+    ushort_struct_unpack_from, int_struct, int_struct_unpack
 )
 from .const import *
+from .dt import txt_date_to_python, bin_date_to_python
 from .network import (
     txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
     bin_cidr_to_python)
 from .numeric import bin_numeric_to_python, txt_numeric_to_python
+from .text import txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STANDARD_BUF_SIZE = 0x4000
@@ -27,8 +29,6 @@ STANDARD_BUF_SIZE = 0x4000
 header_struct_unpack_from = Struct("!Bi").unpack_from
 int2_struct = Struct('!h')
 int2_struct_unpack = int2_struct.unpack
-int_struct = Struct('!i')
-int_struct_unpack = int_struct.unpack
 int_struct_unpack_from = int_struct.unpack_from
 
 uint_struct = Struct('!I')
@@ -210,7 +210,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 ('I', self.handle_empty_query_response),
                 ('n', self.handle_nodata),
             ]}
-        self._status_parameters: Dict[str, str] = {}
+        self._server_parameters: Dict[str, str] = {}
         self._iso_dates = False
         self._tz_info: Optional[ZoneInfo] = None
         self._backend: Optional[Tuple[int, int]] = None
@@ -220,6 +220,10 @@ class _BasePGProtocol(_AbstractPGProtocol):
     @property
     def transaction_status(self) -> TransactionStatus:
         return TransactionStatus(self._transaction_status)
+
+    @property
+    def server_parameters(self) -> TransactionStatus:
+        return self._server_parameters
 
     @property
     def status(self) -> ProtocolStatus:
@@ -379,7 +383,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 self._tz_info = ZoneInfo(val)
             except ZoneInfoNotFoundError:
                 self._tz_info = None
-        self._status_parameters[name] = val
+        self._server_parameters[name] = val
 
     def handle_backend_key_data(self, msg_buf: memoryview) -> None:
         self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
@@ -456,8 +460,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             TEXTOID: (decode, decode),
             VARCHAROID: (decode, decode),
             BPCHAROID: (decode, decode),
+            BYTEAOID: (txt_bytea_to_python, bytes),
             INETOID: (txt_inet_to_python, bin_inet_to_python),
             CIDROID: (txt_cidr_to_python, bin_cidr_to_python),
+            UUIDOID: (txt_uuid_to_python, bin_uuid_to_python),
+            DATEOID: (self.txt_date_to_python, bin_date_to_python),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: int_to_pg,
@@ -702,9 +709,9 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 res_fields=res_fields, res_converters=converters)
 
     def handle_data_row(self, buf: memoryview) -> None:
-        if self.res_converters is None:
-            raise ProtocolError("Unexpected data row.")
         value_converters = self.res_converters
+        if value_converters is None:
+            raise ProtocolError("Unexpected data row.")
         if ushort_struct_unpack_from(buf)[0] != len(value_converters):
             raise ProtocolError("Invalid number of row values")
 
@@ -794,3 +801,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         else:
             self._set_result(self._result)
         self._result = None
+
+    def txt_date_to_python(self, buf: memoryview):
+        if self._iso_dates:
+            return txt_date_to_python(buf)
+        return decode(buf)

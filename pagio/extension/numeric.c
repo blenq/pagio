@@ -249,3 +249,121 @@ fill_bool_info(
     *p_fmt = 1;
     return 0;
 }
+
+
+// ================ numeric ================================================ //
+
+static PyObject *Decimal;
+
+
+PyObject *
+convert_pg_numeric_text(PPObject *self, char *buf, int len) {
+    return PyObject_CallFunction(Decimal, "s#", buf, len);
+}
+
+#define NUMERIC_NAN 0xC000
+#define NUMERIC_POS 0x0000
+#define NUMERIC_NEG 0x4000
+
+static int
+numeric_set_digit(PyObject *digits, int idx, int val) {
+    PyObject *digit;
+
+    digit = PyLong_FromLong(val);
+    if (digit == NULL) {
+        return -1;
+    }
+    PyTuple_SET_ITEM(digits, idx, digit);
+    return 0;
+}
+
+
+PyObject *
+convert_pg_numeric_bin(PPObject *self, char *buf, int len) {
+
+    unsigned short npg_digits, sign;
+    short weight;
+    PyObject *digits, *ret = NULL;
+
+    if (len < 8) {
+        PyErr_SetString(PyExc_ValueError, "Invalid numeric value");
+        return NULL;
+    }
+
+    /* Get the field values */
+    npg_digits = unpack_uint2(buf);
+
+    if (len != 8 + npg_digits * 2) {
+        PyErr_SetString(PyExc_ValueError, "Invalid numeric value");
+        return NULL;
+    }
+    weight = unpack_int2(buf + 2);
+    sign = unpack_uint2(buf + 4);
+//    dscale = read_uint16(data + 6);
+    /* TODO check valid scale like postgres does */
+
+    /* Check sign */
+    if (sign == NUMERIC_NAN) {
+        /* We're done it's a NaN */
+        return PyObject_CallFunction(Decimal, "s", "NaN");
+    }
+    if (sign == NUMERIC_NEG) {
+        sign = 1;
+    }
+    else if (sign != NUMERIC_POS) {
+        PyErr_SetString(PyExc_ValueError, "Invalid value for numeric sign");
+        return NULL;
+    }
+
+    digits = PyTuple_New(npg_digits * 4);
+    if (digits == NULL) {
+    	return NULL;
+    }
+    buf += 8;
+    for (int i = 0; i < npg_digits; i++) {
+        unsigned int pg_digit;
+
+        pg_digit = unpack_uint2(buf + i * 2);
+        if (pg_digit > 9999) {
+            PyErr_SetString(PyExc_ValueError, "Invalid numeric value");
+            goto end;
+        }
+        if (numeric_set_digit(digits, i * 4, pg_digit / 1000) == -1) {
+            goto end;
+        }
+        pg_digit = pg_digit % 1000;
+        if (numeric_set_digit(digits, i * 4 + 1, pg_digit / 100) == -1) {
+            goto end;
+        }
+        pg_digit = pg_digit % 100;
+        if (numeric_set_digit(digits, i * 4 + 2, pg_digit / 10) == -1 ||
+                numeric_set_digit(digits, i * 4 + 3, pg_digit % 10) == -1) {
+            goto end;
+        }
+    }
+    ret = PyObject_CallFunction(
+        Decimal, "((HOi))", sign, digits, (weight + 1 - npg_digits) * 4);
+end:
+    Py_DECREF(digits);
+    return ret;
+}
+
+
+int
+init_numeric(void)
+{
+    PyObject *decimal_module;
+
+    decimal_module = PyImport_ImportModule("decimal");
+    if (decimal_module == NULL) {
+        return -1;
+    }
+
+    Decimal = PyObject_GetAttrString(decimal_module, "Decimal");
+    if (Decimal == NULL) {
+        Py_DECREF(decimal_module);
+        return -1;
+    }
+    Py_DECREF(decimal_module);
+    return 0;
+}

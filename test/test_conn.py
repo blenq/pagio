@@ -20,6 +20,11 @@ class ConnCase(unittest.TestCase):
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         cn.close()
 
+    def test_parameter_status(self):
+        cn = Connection(database="postgres")
+        self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
+        cn.close()
+
     def test_simple_query(self):
         cn = Connection(database="postgres")
         res = cn.execute("SET TIMEZONE TO 'Europe/Paris'")

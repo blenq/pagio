@@ -4,6 +4,7 @@
 BOOLOID = 16
 
 # character types
+BYTEAOID = 17
 CHAROID = 18
 NAMEOID = 19
 TEXTOID = 25
@@ -28,3 +29,9 @@ OIDOID = 26
 # network types
 CIDROID = 650
 INETOID = 869
+
+# date/time
+DATEOID = 1082
+
+# uuid
+UUIDOID = 2950

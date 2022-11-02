@@ -29,20 +29,11 @@ typedef struct {
     PyObject *obj;
 } ParamInfo;
 
-#define BOOLOID 16
-#define FLOAT4OID 700
-#define FLOAT8OID 701
-
 #define CHAROID 18
 #define NAMEOID 19
 #define TEXTOID 25
 #define BPCHAROID 1042
 #define VARCHAROID 1043
-
-#define INT8OID 20
-#define INT2OID 21
-#define INT4OID 23
-#define OIDOID 26
 
 
 #endif /* _PAGIO_H */

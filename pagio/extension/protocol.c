@@ -4,6 +4,10 @@
 #include "numeric.h"
 #include "utils.h"
 #include "network.h"
+#include "text.h"
+#include "uuid.h"
+#include "datetime.h"
+
 
 #define _STATUS_CLOSED 0
 #define _STATUS_READY_FOR_QUERY 5
@@ -22,7 +26,7 @@ static inline void pack_int2(char *ptr, int16_t val) {
 }
 
 
-static int read_ushort(char **ptr, char *end, uint16_t *val) {
+int read_ushort(char **ptr, char *end, uint16_t *val) {
     if ((size_t) (end - *ptr) < sizeof(uint16_t)) {
         *val = 0;
         PyErr_SetString(PyExc_ValueError, "Invalid size for ushort");
@@ -196,12 +200,6 @@ PPget_buffer(PPObject *self, PyObject *arg)
 }
 
 
-static PyObject *
-convert_pg_text(PPObject *self, char *buf, int len) {
-    return PyUnicode_FromStringAndSize(buf, len);
-}
-
-
 static res_converter
 get_text_converter(unsigned int type_oid)
 {
@@ -220,15 +218,15 @@ get_text_converter(unsigned int type_oid)
         return convert_pg_inet_text;
     case CIDROID:
         return convert_pg_cidr_text;
+    case NUMERICOID:
+        return convert_pg_numeric_text;
+    case BYTEAOID:
+        return convert_pg_bytea_text;
+    case UUIDOID:
+        return convert_pg_uuid_text;
     default:
         return convert_pg_text;
     }
-}
-
-
-static PyObject *
-convert_pg_binary(PPObject *self, char *buf, int len) {
-    return PyBytes_FromStringAndSize(buf, len);
 }
 
 
@@ -260,6 +258,10 @@ get_binary_converter(unsigned int type_oid)
         return convert_pg_inet_bin;
     case CIDROID:
         return convert_pg_cidr_bin;
+    case NUMERICOID:
+        return convert_pg_numeric_bin;
+    case UUIDOID:
+        return convert_pg_uuid_bin;
     default:
         return convert_pg_binary;
     }
@@ -927,7 +929,6 @@ fill_params(
 {
     Py_ssize_t num_params, i;
 
-
     *param_vals_len = 0;
     num_params = PyTuple_GET_SIZE(params);
     if (num_params == 0) {
@@ -1244,12 +1245,13 @@ static int
 append_fixed_message(PyObject *message, const char *string, int len)
 {
     PyObject *msg;
+    int ret;
 
     msg = PyBytes_FromStringAndSize(string, len);
     if (msg == NULL) {
         return -1;
     }
-    int ret = PyList_Append(message, msg);
+    ret = PyList_Append(message, msg);
     Py_DECREF(msg);
     return ret;
 }
@@ -1260,6 +1262,7 @@ append_desc_message(PyObject *message)
 {
     return append_fixed_message(message, "D\0\0\0\x06P\0", 7);
 }
+
 
 static inline int
 append_exec_sync_message(PyObject *message)
@@ -1347,22 +1350,20 @@ _PPexecute_message(
         goto end;
     }
 
-    if (self->prepare_threshold) {
-        if (prepared) {
-            PyObject *res_rows = NULL;
-            if (PagioST_RES_FIELDS(self->cache_item)) {
-                res_rows = PyList_New(0);
-                if (res_rows == NULL) {
-                    Py_CLEAR(message);
-                    goto end;
-                }
+    if (prepared) {
+        PyObject *res_rows = NULL;
+        if (PagioST_RES_FIELDS(self->cache_item)) {
+            res_rows = PyList_New(0);
+            if (res_rows == NULL) {
+                Py_CLEAR(message);
+                goto end;
             }
-            self->res_rows = res_rows;
-            self->res_fields = PagioST_RES_FIELDS(self->cache_item) ;
-            Py_XINCREF(self->res_fields);
-            self->res_converters = PagioST_RES_CONVERTERS(self->cache_item);
-            Py_XINCREF(self->res_fields);
         }
+        self->res_rows = res_rows;
+        self->res_fields = PagioST_RES_FIELDS(self->cache_item) ;
+        Py_XINCREF(self->res_fields);
+        self->res_converters = PagioST_RES_CONVERTERS(self->cache_item);
+        Py_XINCREF(self->res_fields);
     }
     self->status = _STATUS_EXECUTING;
     ret = 0;
@@ -1468,6 +1469,15 @@ PyInit__pagio(void)
     PyObject *m;
 
     if (init_network() == -1) {
+        return NULL;
+    }
+    if (init_numeric() == -1) {
+        return NULL;
+    }
+    if (init_uuid() == -1) {
+        return NULL;
+    }
+    if (init_datetime() == -1) {
         return NULL;
     }
 

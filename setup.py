@@ -10,6 +10,9 @@ pagio_ext = Extension(
         'pagio/extension/utils.c',
         'pagio/extension/field_info.c',
         'pagio/extension/network.c',
+        'pagio/extension/text.c',
+        'pagio/extension/uuid.c',
+        'pagio/extension/datetime.c',
     ],
     depends=[
         'pagio/extension/pagio.h',
@@ -20,6 +23,9 @@ pagio_ext = Extension(
         'pagio/extension/utils.h',
         'pagio/extension/field_info.h',
         'pagio/extension/network.h',
+        'pagio/extension/text.h',
+        'pagio/extension/uuid.h',
+        'pagio/extension/datetime.h',
     ],
 )
 

@@ -1,7 +1,8 @@
-import decimal
+from datetime import date
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
 import unittest
+from uuid import UUID
 
 from pagio import Connection, sync_connection, sync_protocol, Format
 
@@ -49,8 +50,6 @@ class ConnTypeCase(unittest.TestCase):
         if expected.is_nan() and actual.is_nan():
             return
         self.assertEqual(expected, actual)
-        self.assertGreaterEqual(
-            len(actual.as_tuple()[1]), len(expected.as_tuple()[1]))
 
     def _test_numeric_val(self, sql, val):
         res = self._cn.execute(sql)
@@ -86,6 +85,38 @@ class ConnTypeCase(unittest.TestCase):
         self._test_numeric_val(
             "SELECT '1234567890.0987654321'::numeric",
             Decimal("1234567890.0987654321"))
+
+    def test_bytea_result(self):
+        self._cn.execute("SET bytea_output TO 'hex'")
+        self._test_val_result("SELECT '\\x09686f695c'::bytea", b'\thoi\\')
+        self._cn.execute("SET bytea_output TO 'escape'")
+        self._test_val_result("SELECT '\\x09686f695c'::bytea", b'\thoi\\')
+
+    def test_uuid_result(self):
+        self._test_val_result(
+            "SELECT '42d36a04-8ff1-4337-870e-51de61b19771'::uuid",
+            UUID('42d36a04-8ff1-4337-870e-51de61b19771'))
+
+    def test_date_result(self):
+        self._test_val_result(
+            "SELECT '2021-03-15'::date", date(2021, 3, 15))
+        self._test_val_result(
+            "SELECT '0900-03-15'::date", date(900, 3, 15))
+        self._test_val_result(
+            "SELECT '20210-03-15'::date", '20210-03-15')
+        self._test_val_result(
+            "SELECT '2021-03-15 BC'::date", '2021-03-15 BC')
+        self._test_val_result(
+            "SELECT 'infinity'::date", 'infinity')
+        self._test_val_result(
+            "SELECT '-infinity'::date", '-infinity')
+        self._cn.execute("SET DateStyle TO postgres, dmy")
+        res = self._cn.execute(
+            "SELECT '2021-03-15'::date", result_format=Format.TEXT)
+        self.assertEqual("15-03-2021", res[0][0])
+        res = self._cn.execute(
+            "SELECT '2021-03-15'::date", result_format=Format.BINARY)
+        self.assertEqual(date(2021, 3, 15), res[0][0])
 
 
 class PyConnTypeCase(ConnTypeCase):

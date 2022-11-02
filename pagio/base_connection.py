@@ -129,3 +129,7 @@ class BaseConnection:
         if self._protocol is None:
             return None
         return self._protocol.tz_info
+
+    @property
+    def server_parameters(self):
+        return self._protocol.server_parameters

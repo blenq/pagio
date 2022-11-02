@@ -8,6 +8,9 @@ from typing import Tuple, Any, Optional, Union, List, Iterator
 
 ushort_struct_unpack_from = Struct('!H').unpack_from
 
+int_struct = Struct('!i')
+int_struct_unpack = int_struct.unpack
+
 
 class Severity(enum.Enum):
     """ Severity of ServerError """

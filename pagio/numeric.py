@@ -18,8 +18,6 @@ NUMERIC_NEG = 0x4000
 
 def bin_numeric_to_python(buf: memoryview):
     npg_digits, weight, sign, dscale = numeric_header.unpack_from(buf)
-    if weight < 0:
-        raise ProtocolError("Invalid value for numeric weight.")
 
     if sign == NUMERIC_NAN:
         sign = 0
@@ -30,14 +28,12 @@ def bin_numeric_to_python(buf: memoryview):
             sign = 1
         elif sign != NUMERIC_POS:
             raise Exception('Bad value')
-        exp = -dscale
-
-        ndigits = dscale + (weight + 1) * 4
+        exp = (weight + 1 - npg_digits) * 4
+        buf = buf[numeric_header.size:]
 
         def get_digits():
-            offset = numeric_header.size
-            for _ in range(npg_digits):
-                dg = ushort_struct_unpack_from(buf, offset)[0]
+            for i in range(npg_digits):
+                dg = ushort_struct_unpack_from(buf, i * 2)[0]
                 if dg > 9999:
                     raise ValueError("Invalid value")
                 # a postgres digit contains 4 decimal digits
@@ -48,9 +44,6 @@ def bin_numeric_to_python(buf: memoryview):
                 q, r = divmod(r, 10)
                 yield q
                 yield r
-                offset += 2
-            # yield zeroes until caller is done
-            yield from repeat(0)
 
-        digits = [dg for dg in islice(get_digits(), ndigits)]
+        digits = [dg for dg in get_digits()]
     return Decimal((sign, digits, exp))
