@@ -3,8 +3,6 @@
 #ifndef _PROTOCOL_H
 #define _PROTOCOL_H
 
-#include "stmt.h"
-
 typedef struct _PPobject {
     PyObject_HEAD
     int bytes_read;                     // network buffers
@@ -16,7 +14,10 @@ typedef struct _PPobject {
     int status;                         // protocol
     char identifier;                    // protocol
     char transaction_status;            // protocol
+    char iso_dates;                     // protocol
     PyObject *ex;                       // protocol
+    PyObject *server_parameters;        // protocol
+    PyObject *zone_info;                // protocol
 
     unsigned int prepare_threshold;     // caching
     unsigned int cache_size;            // caching

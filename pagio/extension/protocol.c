@@ -157,6 +157,10 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF(self);
         return NULL;
     }
+    self->server_parameters = PyDict_New();
+    if (self->server_parameters == NULL) {
+        Py_DECREF(self);
+    }
     self->status = _STATUS_CLOSED;
     return (PyObject *) self;
 }
@@ -178,6 +182,8 @@ PP_dealloc(PPObject *self)
     }
     Py_CLEAR(self->cache_item);
     Py_CLEAR(self->stmt_cache);
+    Py_CLEAR(self->server_parameters);
+    Py_CLEAR(self->zone_info);
     if (self->buf_ptr != self->standard_buf_ptr) {
         PyMem_Free(self->buf_ptr);
     }
@@ -197,6 +203,57 @@ PPget_buffer(PPObject *self, PyObject *arg)
     }
     Py_INCREF(self->buf);
     return self->buf;
+}
+
+static int
+PPhandle_parameter_status(PPObject *self, char **buf, char *end) {
+    char *end_name;
+    int ret;
+    PyObject *val;
+
+    if (end == *buf) {
+        PyErr_SetString(
+            PyExc_ValueError, "Invalid parameter status message.");
+        return -1;
+    }
+    if (*(end - 1) != '\0') {
+        PyErr_SetString(
+            PyExc_ValueError, "Invalid parameter status message.");
+        return -1;
+    }
+    end_name = memchr(*buf, 0, end - *buf - 2);
+    if (end_name == NULL) {
+        PyErr_SetString(
+            PyExc_ValueError, "Invalid parameter status message.");
+        return -1;
+    }
+    if (strcmp(*buf, "client_encoding") == 0) {
+        if (strcmp(end_name + 1, "UTF8")) {
+            PyErr_SetString(
+                PyExc_ValueError,
+                "The pagio library only works with 'UTF-8' encoding");
+            return -1;
+        }
+    }
+    else if (strcmp(*buf, "DateStyle") == 0) {
+        self->iso_dates = (strncmp(end_name + 1, "ISO,", 4) == 0);
+    }
+
+    val = PyUnicode_FromString(end_name + 1);
+    if (val == NULL) {
+        return -1;
+    }
+    if (strcmp(*buf, "TimeZone") == 0) {
+        self->zone_info = PyObject_CallFunctionObjArgs(ZoneInfo, val, NULL);
+        if (self->zone_info == NULL) {
+            PyErr_Clear();
+        }
+    }
+    ret = PyDict_SetItemString(self->server_parameters, *buf, val);
+    Py_DECREF(val);
+    *buf = end;
+
+    return ret;
 }
 
 
@@ -224,6 +281,8 @@ get_text_converter(unsigned int type_oid)
         return convert_pg_bytea_text;
     case UUIDOID:
         return convert_pg_uuid_text;
+    case DATEOID:
+        return convert_pg_date_text;
     default:
         return convert_pg_text;
     }
@@ -262,6 +321,8 @@ get_binary_converter(unsigned int type_oid)
         return convert_pg_numeric_bin;
     case UUIDOID:
         return convert_pg_uuid_bin;
+    case DATEOID:
+        return convert_pg_date_bin;
     default:
         return convert_pg_binary;
     }
@@ -695,6 +756,9 @@ PPhandle_message(PPObject *self, char *buf) {
 //    fprintf(stderr, "Identifier: %c\n", self->identifier);
     end = buf + self->msg_len;
     switch (self->identifier) {
+    case 'S':
+        handler = PPhandle_parameter_status;
+        break;
     case 'T':
         handler = PPhandle_rowdescription;
         break;
@@ -1431,6 +1495,12 @@ static PyMemberDef PP_members[] = {
     },
     {"_cache_size", T_UINT, offsetof(PPObject, cache_size), 0,
      "cache size"
+    },
+    {"_server_parameters", T_OBJECT_EX, offsetof(PPObject, server_parameters),
+     READONLY, "server parameters"
+    },
+    {"_tz_info", T_OBJECT_EX, offsetof(PPObject, zone_info), READONLY,
+     "timezone info"
     },
     {NULL}  /* Sentinel */
 };

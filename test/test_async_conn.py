@@ -34,6 +34,11 @@ class ConnCase(IsolatedAsyncioTestCase):
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         await cn.close()
 
+    async def test_parameter_status(self):
+        cn = await AsyncConnection(database="postgres")
+        self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
+        await cn.close()
+
     async def test_simple_query(self):
         cn = await AsyncConnection(database="postgres")
         res = await cn.execute("SET TIMEZONE TO 'Europe/Paris'")

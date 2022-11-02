@@ -205,14 +205,10 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 # ' ': self.handle_ssl_response,
                 ('E', self.handle_error),
                 ('R', self.handle_auth_req),
-                ('S', self.handle_parameter_status),
                 ('K', self.handle_backend_key_data),
                 ('I', self.handle_empty_query_response),
                 ('n', self.handle_nodata),
             ]}
-        self._server_parameters: Dict[str, str] = {}
-        self._iso_dates = False
-        self._tz_info: Optional[ZoneInfo] = None
         self._backend: Optional[Tuple[int, int]] = None
         self.password: Union[None, str, bytes] = None
         self.user: Union[None, str, bytes] = None
@@ -363,28 +359,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")
 
-    def handle_parameter_status(self, msg_buf: memoryview) -> None:
-        # format: "{param_name}\0{param_value}\0"
-
-        param = bytes(msg_buf)
-        param_parts = param.split(b'\0')
-        if len(param_parts) != 3 or param_parts[2] != b'':
-            raise ProtocolError("Invalid parameter status message")
-        b_name, b_val = param_parts[:2]
-        if b_name == b"client_encoding" and b_val != b'UTF8':
-            raise InvalidOperationError(
-                "The pagio library only works with 'UTF-8' encoding")
-        name = decode(b_name)
-        val = decode(b_val)
-        if name == "DateStyle":
-            self._iso_dates = val.startswith("ISO,")
-        elif name == "TimeZone":
-            try:
-                self._tz_info = ZoneInfo(val)
-            except ZoneInfoNotFoundError:
-                self._tz_info = None
-        self._server_parameters[name] = val
-
     def handle_backend_key_data(self, msg_buf: memoryview) -> None:
         self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
 
@@ -434,10 +408,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         # status vars
         self._status = _STATUS_CLOSED
         self._transaction_status = 0
+        self._server_parameters: Dict[str, str] = {}
+        self._iso_dates = False
+        self._tz_info: Optional[ZoneInfo] = None
 
         super().__init__(*args)
         self._handlers.update({
             ord(k): v for k, v in [
+                ('S', self.handle_parameter_status),
                 ('1', self.handle_parse_complete),
                 ('2', self.handle_bind_complete),
                 ('3', self.handle_close_complete),
@@ -652,6 +630,28 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._status = _STATUS_EXECUTING
 
         return message
+
+    def handle_parameter_status(self, msg_buf: memoryview) -> None:
+        # format: "{param_name}\0{param_value}\0"
+
+        param = bytes(msg_buf)
+        param_parts = param.split(b'\0')
+        if len(param_parts) != 3 or param_parts[2] != b'':
+            raise ProtocolError("Invalid parameter status message")
+        b_name, b_val = param_parts[:2]
+        if b_name == b"client_encoding" and b_val != b'UTF8':
+            raise InvalidOperationError(
+                "The pagio library only works with 'UTF-8' encoding")
+        name = decode(b_name)
+        val = decode(b_val)
+        if name == "DateStyle":
+            self._iso_dates = val.startswith("ISO,")
+        elif name == "TimeZone":
+            try:
+                self._tz_info = ZoneInfo(val)
+            except ZoneInfoNotFoundError:
+                self._tz_info = None
+        self._server_parameters[name] = val
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
         check_length_equal(0, msg_buf)
