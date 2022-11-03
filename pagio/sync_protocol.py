@@ -79,10 +79,12 @@ class _PGProtocol(_BasePGProtocol):
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
+            raw_result: bool,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         self.writelines(
-            self.execute_message(sql, parameters, result_format=result_format))
+            self.execute_message(
+                sql, parameters, result_format, raw_result))
         return ResultSet(self.read())
 
     def execute(
@@ -90,13 +92,15 @@ class _PGProtocol(_BasePGProtocol):
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
+            raw_result: bool,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:
-            return self._execute(sql, parameters, result_format)
+            return self._execute(sql, parameters, result_format, raw_result)
         except CachedQueryExpired:
             if self.transaction_status == TransactionStatus.IDLE:
-                return self._execute(sql, parameters, result_format)
+                return self._execute(
+                    sql, parameters, result_format, raw_result)
             raise
 
     def close(self) -> None:

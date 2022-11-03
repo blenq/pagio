@@ -1,3 +1,4 @@
+import struct
 import unittest
 
 from pagio import (
@@ -103,6 +104,19 @@ class ResultCase(unittest.TestCase):
         with self.assertRaises(ServerError):
             self._cn.execute("SELECT $1, $2", (1,))
         self.assertEqual(self._cn.status, ProtocolStatus.READY_FOR_QUERY)
+
+    def test_raw_result(self):
+        res = self._cn.execute("SELECT 123, 2000000000", raw_result=True)
+        self.assertEqual(("123", "2000000000"), res[0])
+        res = self._cn.execute(
+            "SELECT 123, 2000000000", result_format=Format.TEXT,
+            raw_result=True)
+        self.assertEqual(("123", "2000000000"), res[0])
+        res = self._cn.execute(
+            "SELECT 123, 2000000000", result_format=Format.BINARY,
+            raw_result=True)
+        self.assertEqual(
+            (struct.pack("!i", 123), struct.pack("!i", 2000000000)), res[0])
 
     def tearDown(self) -> None:
         self._cn.close()

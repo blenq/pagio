@@ -64,10 +64,11 @@ class Connection(BaseConnection):
             sql: str,
             *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
+            raw_result: bool = False,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         return self._protocol.execute(
-            sql, parameters, result_format=result_format)
+            sql, parameters, result_format, raw_result)
 
     def close(self) -> None:
         """ Closes the connection """

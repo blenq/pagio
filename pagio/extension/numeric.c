@@ -264,6 +264,9 @@ convert_pg_numeric_text(PPObject *self, char *buf, int len) {
 #define NUMERIC_NAN 0xC000
 #define NUMERIC_POS 0x0000
 #define NUMERIC_NEG 0x4000
+#define NUMERIC_PINF 0xD000
+#define NUMERIC_NINF 0xF000
+
 
 static int
 numeric_set_digit(PyObject *digits, int idx, int val) {
@@ -306,6 +309,12 @@ convert_pg_numeric_bin(PPObject *self, char *buf, int len) {
     if (sign == NUMERIC_NAN) {
         /* We're done it's a NaN */
         return PyObject_CallFunction(Decimal, "s", "NaN");
+    }
+    if (sign == NUMERIC_PINF) {
+        return PyObject_CallFunction(Decimal, "s", "inf");
+    }
+    if (sign == NUMERIC_NINF) {
+        return PyObject_CallFunction(Decimal, "s", "-inf");
     }
     if (sign == NUMERIC_NEG) {
         sign = 1;

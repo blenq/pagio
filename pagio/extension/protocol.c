@@ -500,6 +500,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     unsigned short num_cols;
     int i, ret = -1;
     PyObject *row = NULL;
+    res_converter raw_converter = NULL;
 
     if (read_ushort(buf, end, &num_cols) == -1) {
         return -1;
@@ -511,6 +512,14 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     row = PyTuple_New(num_cols);
     if (row == NULL) {
         return -1;
+    }
+    if (self->raw_result) {
+        if (self->result_format == 0) {
+            raw_converter = convert_pg_text;
+        }
+        else {
+            raw_converter = convert_pg_binary;
+        }
     }
     for (i = 0; i < num_cols; i++) {
         int val_len;
@@ -524,11 +533,14 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             obj = Py_None;
         }
         else {
+            res_converter conv;
             if (*buf + val_len > end) {
                 PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
                 return -1;
             }
-            obj = self->res_converters[i](self, *buf, val_len);
+            conv = raw_converter ? raw_converter : self->res_converters[i];
+
+            obj = conv(self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
             }
@@ -792,6 +804,7 @@ PPhandle_message(PPObject *self, char *buf) {
         Py_CLEAR(self->res_rows);
         Py_CLEAR(self->res_fields);
         handler = PPfallback_handler;
+        break;
     default:
         handler = PPfallback_handler;
     }
@@ -1238,10 +1251,6 @@ append_bind_message(
             return -1;
         }
     }
-    if (result_format == -1) {
-        // if default use binary for extended protocol
-        result_format = 1;
-    }
     // Bind:
     //      identifier 'B' (1)
     //      message length (4)
@@ -1341,7 +1350,8 @@ _PPexecute_message(
     PyObject *message,
     PyObject *sql,
     PyObject *params,
-    int result_format)
+    int result_format
+    )
 {
     ParamInfo *param_info;
     unsigned int *oids;
@@ -1382,6 +1392,7 @@ _PPexecute_message(
         if (append_simple_query_message(message, sql) == -1) {
             goto end;
         }
+        self->result_format = 0;
     } else {
         // use extended query
         if (!prepared) {
@@ -1390,7 +1401,11 @@ _PPexecute_message(
                 goto end;
             }
         }
-
+        if (result_format == -1) {
+            // if default use binary for extended protocol
+            result_format = 1;
+        }
+        self->result_format = result_format;
         if (append_bind_message(
                 message, index, param_info, p_formats,
                 PyTuple_GET_SIZE(params), param_vals_len, result_format
@@ -1439,15 +1454,14 @@ end:
 
 
 static PyObject *
-PPexecute_message(PPObject *self, PyObject *args, PyObject *kwargs)
+PPexecute_message(PPObject *self, PyObject *args)
 {
-    static char *kwlist[] = {"", "", "result_format", NULL};
     PyObject *sql, *params, *message;
-    int result_format = 0;
+    int result_format = 0, raw_result;
 
-    if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, "O!O!|$i:execute_message", kwlist, &PyUnicode_Type,
-            &sql, &PyTuple_Type, &params, &result_format)) {
+    if (!PyArg_ParseTuple(
+            args, "O!O!ip:execute_message", &PyUnicode_Type,
+            &sql, &PyTuple_Type, &params, &result_format, &raw_result)) {
         return NULL;
     }
     if (PyTuple_GET_SIZE(params) > INT16_MAX) {
@@ -1462,9 +1476,11 @@ PPexecute_message(PPObject *self, PyObject *args, PyObject *kwargs)
     if (message == NULL) {
         return NULL;
     }
-    if (_PPexecute_message(self, message, sql, params, result_format) == -1) {
+    if (_PPexecute_message(
+            self, message, sql, params, result_format) == -1) {
         Py_CLEAR(message);
     }
+    self->raw_result = raw_result;
 
     return message;
 }
@@ -1477,7 +1493,7 @@ static PyMethodDef PP_methods[] = {
     {"buffer_updated", (PyCFunction) PPbuffer_updated, METH_O,
      "Buffer updated"
     },
-    {"execute_message", (PyCFunction) PPexecute_message, METH_VARARGS | METH_KEYWORDS,
+    {"execute_message", (PyCFunction) PPexecute_message, METH_VARARGS,
      "Execute message"
     },
     {NULL}  /* Sentinel */
@@ -1499,7 +1515,7 @@ static PyMemberDef PP_members[] = {
     {"_server_parameters", T_OBJECT_EX, offsetof(PPObject, server_parameters),
      READONLY, "server parameters"
     },
-    {"_tz_info", T_OBJECT_EX, offsetof(PPObject, zone_info), READONLY,
+    {"_tz_info", T_OBJECT, offsetof(PPObject, zone_info), READONLY,
      "timezone info"
     },
     {NULL}  /* Sentinel */

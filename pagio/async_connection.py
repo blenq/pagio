@@ -61,9 +61,10 @@ class AsyncConnection(BaseConnection):
             sql: str,
             *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
+            raw_result: bool = False,
     ) -> ResultSet:
         return await self._protocol.execute(
-            sql, parameters, result_format=result_format)
+            sql, parameters, result_format, raw_result)
 
     async def close(self) -> None:
         await self._protocol.close()

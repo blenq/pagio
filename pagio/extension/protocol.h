@@ -15,6 +15,8 @@ typedef struct _PPobject {
     char identifier;                    // protocol
     char transaction_status;            // protocol
     char iso_dates;                     // protocol
+    char result_format;                 // protocol
+    char raw_result;                    // protocol
     PyObject *ex;                       // protocol
     PyObject *server_parameters;        // protocol
     PyObject *zone_info;                // protocol

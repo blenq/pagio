@@ -85,6 +85,11 @@ class ConnTypeCase(unittest.TestCase):
         self._test_numeric_val(
             "SELECT '1234567890.0987654321'::numeric",
             Decimal("1234567890.0987654321"))
+        if int(self._cn.server_parameters["server_version"].split(".", 1)[0]) >= 14:
+            self._test_numeric_val(
+                "SELECT 'inf'::numeric", Decimal("inf"))
+            self._test_numeric_val(
+                "SELECT '-inf'::numeric", Decimal("-inf"))
 
     def test_bytea_result(self):
         self._cn.execute("SET bytea_output TO 'hex'")

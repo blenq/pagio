@@ -1,3 +1,4 @@
+import struct
 try:
     from unittest import IsolatedAsyncioTestCase
 except ImportError:
@@ -103,6 +104,19 @@ class ResultCase(IsolatedAsyncioTestCase):
         with self.assertRaises(ServerError):
             await self._cn.execute("SELECT $1, $2", (1,))
         self.assertEqual(self._cn.status, ProtocolStatus.READY_FOR_QUERY)
+
+    async def test_raw_result(self):
+        res = await self._cn.execute("SELECT 123, 2000000000", raw_result=True)
+        self.assertEqual(("123", "2000000000"), res[0])
+        res = await self._cn.execute(
+            "SELECT 123, 2000000000", result_format=Format.TEXT,
+            raw_result=True)
+        self.assertEqual(("123", "2000000000"), res[0])
+        res = await self._cn.execute(
+            "SELECT 123, 2000000000", result_format=Format.BINARY,
+            raw_result=True)
+        self.assertEqual(
+            (struct.pack("!i", 123), struct.pack("!i", 2000000000)), res[0])
 
     async def asyncTearDown(self) -> None:
         await self._cn.close()

@@ -4,6 +4,7 @@ from collections import OrderedDict
 from decimal import Decimal
 import enum
 from hashlib import md5
+from itertools import repeat
 from struct import Struct, unpack_from, pack
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
@@ -186,6 +187,7 @@ class _AbstractPGProtocol(ABC):
         sql: str,
         parameters: Tuple[Any, ...],
         result_format: Format,
+        raw_result: bool,
     ) -> List[bytes]:
         ...
 
@@ -400,6 +402,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_rows: Optional[List[Tuple[Any, ...]]] = None
         self.res_fields: Optional[List[FieldInfo]] = None
         self.res_converters: Optional[List[ResConverter]] = None
+        self._result_format = Format.DEFAULT
+        self._raw_result = False
 
         # return values
         self._result: Optional[List[Tuple[Optional[List[FieldInfo]], Optional[List[Tuple[Any, ...]]], str]]] = None
@@ -524,8 +528,6 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             result_format: Format,
         ) -> bytes:
 
-        if result_format == Format.DEFAULT:
-            result_format = Format.BINARY
         stmt_name_len = len(stmt_name)
         num_params = len(param_fmts)
         bind_length = stmt_name_len + 14 + num_params * 6
@@ -556,6 +558,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
+            raw_result: bool,
     ) -> List[bytes]:
         message = []
 
@@ -598,6 +601,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 and not prepared
                 and not stmt_name):
             # Use simple query
+            result_format = Format.TEXT
             message.append(self._simple_query_msg(sql))
         else:
             if not prepared:
@@ -605,6 +609,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 message.append(self._parse_msg(sql, stmt_name, param_oids))
 
             # Bind
+            if result_format == Format.DEFAULT:
+                result_format = Format.BINARY
             message.append(self._bind_msg(
                 stmt_name, param_vals, param_structs, param_lens, param_fmts,
                 result_format))
@@ -628,6 +634,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 self.res_rows = None if self.res_fields is None else []
         self._result = []
         self._status = _STATUS_EXECUTING
+        self._result_format = result_format
+        self._raw_result = raw_result
 
         return message
 
@@ -714,6 +722,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Unexpected data row.")
         if ushort_struct_unpack_from(buf)[0] != len(value_converters):
             raise ProtocolError("Invalid number of row values")
+        if self._raw_result:
+            if self._result_format == Format.TEXT:
+                value_converters = repeat(decode, len(value_converters))
+            else:
+                value_converters = repeat(bytes, len(value_converters))
 
         def get_vals() -> Generator[Any, None, None]:
             offset = 2

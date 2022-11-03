@@ -17,8 +17,9 @@ class ConnCase(IsolatedAsyncioTestCase):
         await cn.close()
 
     async def test_not_awaited_closed(self):
-        cn = AsyncConnection(database="postgress")
+        cn = AsyncConnection(database="postgres")
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
+        self.assertEqual(cn.tz_info, None)
 
     async def test_wrong_db(self):
         cn = AsyncConnection(database="postgress")

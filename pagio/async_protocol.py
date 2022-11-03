@@ -73,9 +73,10 @@ class _AsyncPGProtocol(_BasePGProtocol):
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
+            raw_result: bool,
     ) -> ResultSet:
         msg = self.execute_message(
-            sql, parameters, result_format=result_format)
+            sql, parameters, result_format, raw_result)
         self._read_fut = self._loop.create_future()
         await self.writelines(msg)
         return ResultSet(await self._read_fut)
@@ -85,14 +86,17 @@ class _AsyncPGProtocol(_BasePGProtocol):
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
+            raw_result: bool,
     ) -> ResultSet:
         try:
-            return await self._execute(sql, parameters, result_format)
+            return await self._execute(
+                sql, parameters, result_format, raw_result)
         except CachedQueryExpired:
             # Cached statement is expired due to result types change.
             if self.transaction_status == TransactionStatus.IDLE:
                 # Not in a transaction, so retry is possible
-                return await self._execute(sql, parameters, result_format)
+                return await self._execute(
+                    sql, parameters, result_format, raw_result)
             raise
 
     async def close(self) -> None:
