@@ -1,3 +1,5 @@
+import asyncio
+
 try:
     from unittest import IsolatedAsyncioTestCase
 except ImportError:
@@ -16,6 +18,12 @@ class ConnCase(IsolatedAsyncioTestCase):
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         await cn.close()
 
+    async def test_ip_conn(self):
+        cn = await AsyncConnection(
+            host='localhost', database='postgres', password='hoi\uE100')
+        self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
+        await cn.close()
+
     async def test_not_awaited_closed(self):
         cn = AsyncConnection(database="postgres")
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
@@ -28,12 +36,6 @@ class ConnCase(IsolatedAsyncioTestCase):
         except:
             pass
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
-
-    async def test_ip_conn(self):
-        cn = await AsyncConnection(
-            host='localhost', database='postgres', password='owiCelm1')
-        self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
-        await cn.close()
 
     async def test_parameter_status(self):
         cn = await AsyncConnection(database="postgres")
@@ -190,6 +192,26 @@ class ConnCase(IsolatedAsyncioTestCase):
             with self.assertRaises(CachedQueryExpired):
                 res = await cn.execute("SELECT * FROM test_val")
             await cn.execute("ROLLBACK")
+
+    async def test_async_timeout(self):
+        # An asyncio timeout should cause a backend cancel to keep the
+        # connection in a usable state
+        async with await AsyncConnection(database="postgres") as cn:
+            try:
+                await asyncio.wait_for(cn.execute("SELECT pg_sleep(5)"), 0.1)
+            except asyncio.TimeoutError:
+                pass
+            self.assertEqual(ProtocolStatus.READY_FOR_QUERY, cn.status)
+
+        async with await AsyncConnection(
+            host='localhost', database='postgres', password='hoi\uE100'
+        ) as cn:
+            try:
+                await asyncio.wait_for(cn.execute("SELECT pg_sleep(5)"), 0.1)
+            except asyncio.TimeoutError:
+                pass
+            self.assertEqual(ProtocolStatus.READY_FOR_QUERY, cn.status)
+
 
 class PyConnCase(ConnCase):
     @classmethod

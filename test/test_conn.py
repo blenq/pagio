@@ -16,7 +16,7 @@ class ConnCase(unittest.TestCase):
 
     def test_ip_conn(self):
         cn = Connection(
-            host='localhost', database='postgres', password='owiCelm1')
+            host='localhost', database='postgres', password='hoi\uE100')
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         cn.close()
 
@@ -112,6 +112,23 @@ class ConnCase(unittest.TestCase):
             res = cn.execute(
                 "SELECT COUNT(*) AS num FROM pg_prepared_statements")
             self.assertEqual(res.rows[0][0], 0)
+
+            cn.execute("SELECT 1 AS val")
+            cn.execute("SELECT 1 AS val")
+
+            # executed twice, so should be prepared now
+            res = cn.execute(
+                "SELECT COUNT(*) AS num2 FROM pg_prepared_statements")
+            self.assertEqual(res.rows[0][0], 1)
+
+            # cn.execute("PREPARE myplan AS SELECT 2 AS val;")
+            # res = cn.execute("SELECT COUNT(*) AS num3 FROM pg_prepared_statements")
+            # self.assertEqual(res.rows[0][0], 2)
+            # cn.execute("DISCARD ALL").command_tag
+            # cn.execute("SELECT 1 AS val")
+            # cn.execute("SELECT 1 AS val")
+            # cn.execute("DEALLOCATE ALL").command_tag
+            # cn.execute("SELECT 1 AS val")
 
     def test_cache_error(self):
         with Connection(

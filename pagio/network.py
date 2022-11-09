@@ -1,15 +1,22 @@
+""" Network type conversion functions """
+
 from codecs import decode
-from ipaddress import ip_interface, ip_network
+from ipaddress import (
+    ip_interface, ip_network, IPv4Interface, IPv6Interface, IPv4Network,
+    IPv6Network)
 from struct import unpack_from
+from typing import Union, Callable, Any, cast
 
 from .common import ProtocolError, check_length_equal
 
 
-def txt_inet_to_python(buf: memoryview):
+def txt_inet_to_python(buf: memoryview) -> Union[IPv4Interface, IPv6Interface]:
+    """ Converts text to IP interface """
     return ip_interface(decode(buf))
 
 
-def txt_cidr_to_python(buf: memoryview):
+def txt_cidr_to_python(buf: memoryview) -> Union[IPv4Network, IPv6Network]:
+    """ Converts text to IP network """
     return ip_network(decode(buf))
 
 
@@ -17,20 +24,25 @@ PGSQL_AF_INET = 2
 PGSQL_AF_INET6 = PGSQL_AF_INET + 1
 
 
-def get_read_ip_bin(cidr):
+def get_read_ip_bin(cidr: int) -> Callable[[memoryview], Any]:
+    """ Converts PG binary value to IP object """
 
-    cons = [ip_interface, ip_network][cidr]
+    cons = cast(Callable[[Any], Any], [ip_interface, ip_network][cidr])
 
-    def read_ip_bin(buf: memoryview):
+    def read_ip_bin(buf: memoryview) -> Any:
         family, mask, is_cidr, size = unpack_from("4B", buf)
 
         if is_cidr != cidr:
             raise ProtocolError("Wrong value for cidr flag")
 
         if family == PGSQL_AF_INET:
+            if size != 4:
+                raise ProtocolError("Invalid IPv4 value.")
             check_length_equal(8, buf)
             addr_data = unpack_from("!I", buf, 4)[0]
         elif family == PGSQL_AF_INET6:
+            if size != 16:
+                raise ProtocolError("Invalid IPv6 value.")
             check_length_equal(20, buf)
             addr_data = bytes(buf[4:])
         else:

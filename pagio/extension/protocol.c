@@ -283,6 +283,8 @@ get_text_converter(unsigned int type_oid)
         return convert_pg_uuid_text;
     case DATEOID:
         return convert_pg_date_text;
+    case TIMESTAMPOID:
+        return convert_pg_timestamp_text;
     default:
         return convert_pg_text;
     }
@@ -323,6 +325,8 @@ get_binary_converter(unsigned int type_oid)
         return convert_pg_uuid_bin;
     case DATEOID:
         return convert_pg_date_bin;
+    case TIMESTAMPOID:
+        return convert_pg_timestamp_bin;
     default:
         return convert_pg_binary;
     }
@@ -1486,6 +1490,16 @@ PPexecute_message(PPObject *self, PyObject *args)
 }
 
 
+static PyObject *
+PPrequest_ssl(PPObject *self, PyObject *Py_UNUSED(un_used))
+{
+    self->identifier = 32;
+    self->msg_len = 1;
+
+    Py_RETURN_NONE;
+}
+
+
 static PyMethodDef PP_methods[] = {
     {"get_buffer", (PyCFunction) PPget_buffer, METH_VARARGS,
      "Get buffer"
@@ -1496,6 +1510,7 @@ static PyMethodDef PP_methods[] = {
     {"execute_message", (PyCFunction) PPexecute_message, METH_VARARGS,
      "Execute message"
     },
+    {"_setup_ssl_request", (PyCFunction) PPrequest_ssl, METH_NOARGS, "request ssl"},
     {NULL}  /* Sentinel */
 };
 

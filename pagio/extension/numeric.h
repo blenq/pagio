@@ -15,6 +15,21 @@
 
 #define NUMERICOID 1700
 
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 11
+// Define Python 3.11 style functions for lower Python version
+
+static inline
+double PyFloat_Unpack4(const char *p, int le) {
+    return _PyFloat_Unpack4((unsigned char *)p, le);
+}
+
+static inline
+double PyFloat_Unpack8(const char *p, int le) {
+    return _PyFloat_Unpack8((unsigned char *)p, le);
+}
+
+#endif
+
 int init_numeric(void);
 
 PyObject *convert_pg_bool_text(PPObject *self, char *buf, int len);

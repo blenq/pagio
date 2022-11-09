@@ -1,2 +1,2 @@
-typing_extensions
 backports.zoneinfo;python_version<"3.9"
+scramp>=1.2.2

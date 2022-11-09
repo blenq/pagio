@@ -64,6 +64,8 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
 
     async def test_numeric_result(self):
         await self._test_numeric_val(
+            "SELECT '123.456'::numeric", Decimal("123.456"))
+        await self._test_numeric_val(
             "SELECT '123.456'::numeric(12, 5)", Decimal("123.456"))
         await self._test_numeric_val("SELECT 'NaN'::numeric", Decimal("NaN"))
         await self._test_numeric_val(

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
 import unittest
@@ -61,6 +61,8 @@ class ConnTypeCase(unittest.TestCase):
 
     def test_numeric_result(self):
         self._test_numeric_val(
+            "SELECT '123.456'::numeric", Decimal("123.456"))
+        self._test_numeric_val(
             "SELECT '123.456'::numeric(12, 5)", Decimal("123.456"))
         self._test_numeric_val("SELECT 'NaN'::numeric", Decimal("NaN"))
         self._test_numeric_val(
@@ -122,6 +124,48 @@ class ConnTypeCase(unittest.TestCase):
         res = self._cn.execute(
             "SELECT '2021-03-15'::date", result_format=Format.BINARY)
         self.assertEqual(date(2021, 3, 15), res[0][0])
+
+    def test_timestamp_result(self):
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3))
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03.2'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3, 200000))
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03.02'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3, 20000))
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03.0002'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3, 200))
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03.000002'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3, 2))
+        self._test_val_result(
+            "SELECT '0900-03-15 14:10:03'::timestamp",
+            datetime(900, 3, 15, 14, 10, 3))
+        self._test_val_result(
+            "SELECT '20210-03-15 14:10:03'::timestamp",
+            '20210-03-15 14:10:03')
+        self._test_val_result(
+            "SELECT '2021-03-15 14:10:03 BC'::timestamp",
+            '2021-03-15 14:10:03 BC')
+        self._test_val_result(
+            "SELECT '0002-03-15 14:10:03 BC'::timestamp",
+            '0002-03-15 14:10:03 BC')
+        self._test_val_result(
+            "SELECT 'infinity'::timestamp", 'infinity')
+        self._test_val_result(
+            "SELECT '-infinity'::timestamp", '-infinity')
+        self._cn.execute("SET DateStyle TO postgres, dmy")
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03'::timestamp",
+            result_format=Format.TEXT)
+        self.assertEqual("Mon 15 Mar 14:10:03 2021", res[0][0])
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03'::timestamp",
+            result_format=Format.BINARY)
+        self.assertEqual(datetime(2021, 3, 15, 14, 10, 3), res[0][0])
 
 
 class PyConnTypeCase(ConnTypeCase):

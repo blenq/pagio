@@ -1,46 +1,54 @@
+""" Text and bytea conversions """
+
 from binascii import a2b_hex
 from codecs import decode
+from typing import Iterator, Generator
 from uuid import UUID
 
 
-def txt_bytea_to_python(buf: memoryview):
-    if buf[:2] == b'\\x':
-        return a2b_hex(buf[2:])
-    # escape encoding
+def txt_bytea_to_python(buf: memoryview) -> bytes:
+    """ Converts a PG textual bytea value to Python bytes object """
 
-    def next_or_fail(iterator):
+    if buf[:2] == b'\\x':
+        # hexadecimal encoding
+        return a2b_hex(buf[2:])
+
+    # escape encoding
+    def next_or_fail(iterator: Iterator[int]) -> int:
         try:
             ret = next(iterator)
-        except StopIteration:
-            raise ValueError("Invalid bytea value")
+        except StopIteration as exc:
+            raise ValueError("Invalid bytea value") from exc
         return ret
 
-    def get_bytes():
+    def get_bytes() -> Generator[int, None, None]:
         backslash = ord(b'\\')
         biter = iter(buf)
-        for b in biter:
-            if b != backslash:
+        for byte_val in biter:
+            if byte_val != backslash:
                 # regular byte
-                yield b
+                yield byte_val
                 continue
 
-            b = next_or_fail(biter)
-            if b == backslash:
+            byte_val = next_or_fail(biter)
+            if byte_val == backslash:
                 # backslash
-                yield b
+                yield byte_val
                 continue
 
             # octal value
-            b2 = next_or_fail(biter) - 48
-            b3 = next_or_fail(biter) - 48
-            yield (b - 48) * 64 + b2 * 8 + b3
+            byte2 = next_or_fail(biter) - 48
+            byte3 = next_or_fail(biter) - 48
+            yield (byte_val - 48) * 64 + byte2 * 8 + byte3
 
     return bytes(get_bytes())
 
 
-def txt_uuid_to_python(buf: memoryview):
+def txt_uuid_to_python(buf: memoryview) -> UUID:
+    """ Converts PG textual value to Python UUID """
     return UUID(decode(buf))
 
 
-def bin_uuid_to_python(buf: memoryview):
+def bin_uuid_to_python(buf: memoryview) -> UUID:
+    """ Converts PG binary value to Python UUID """
     return UUID(bytes=bytes(buf))

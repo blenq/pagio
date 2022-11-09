@@ -2,7 +2,8 @@
 
 from .async_connection import AsyncConnection
 from .base_connection import SSLMode
-from .base_protocol import TransactionStatus, ProtocolStatus, Format
-from .common import ServerError, Error, ProtocolError, CachedQueryExpired
+from .base_protocol import TransactionStatus, ProtocolStatus
+from .common import (
+    ServerError, Error, ProtocolError, CachedQueryExpired, Format)
 from .const import *
 from .sync_connection import Connection

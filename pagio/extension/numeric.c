@@ -28,7 +28,7 @@ convert_pg_float_bin(
     char *buf,
     int len,
     int required_len,
-    double (*unpack)(const unsigned char *, int))
+    double (*unpack)(const char *, int))
 {
 	double val;
 
@@ -37,7 +37,7 @@ convert_pg_float_bin(
         return NULL;
 	}
 
-	val = unpack((unsigned char *)buf, 0);
+	val = unpack(buf, 0);
     if (val == -1.0 && PyErr_Occurred()) {
         return NULL;
     }
@@ -48,14 +48,14 @@ convert_pg_float_bin(
 PyObject *
 convert_pg_float4_bin(PPObject *self, char *buf, int len)
 {
-    return convert_pg_float_bin(self, buf, len, 4, _PyFloat_Unpack4);
+    return convert_pg_float_bin(self, buf, len, 4, PyFloat_Unpack4);
 }
 
 
 PyObject *
 convert_pg_float8_bin(PPObject *self, char *buf, int len)
 {
-    return convert_pg_float_bin(self, buf, len, 8, _PyFloat_Unpack8);
+    return convert_pg_float_bin(self, buf, len, 8, PyFloat_Unpack8);
 }
 
 

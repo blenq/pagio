@@ -4,6 +4,7 @@
 #define _PAGIO_DATETIME_H
 
 #define DATEOID 1082
+#define TIMESTAMPOID 1114
 
 extern PyObject *ZoneInfo;
 
@@ -11,6 +12,8 @@ int init_datetime(void);
 
 PyObject *convert_pg_date_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_date_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_timestamp_text(PPObject *self, char *buf, int len);
+PyObject *convert_pg_timestamp_bin(PPObject *self, char *buf, int len);
 
 
 #endif /* _PAGIO_DATETIME_H */

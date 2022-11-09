@@ -1,49 +1,43 @@
+""" Base protocol functionality """
+
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
-from decimal import Decimal
+from datetime import date
 import enum
 from hashlib import md5
 from itertools import repeat
 from struct import Struct, unpack_from, pack
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
-    Type, OrderedDict as TypingOrderedDict)
+    Type, OrderedDict as TypingOrderedDict, Iterable)
+
+from .pgscramp import PGScrampClient
 
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct_unpack_from, int_struct, int_struct_unpack
+    ushort_struct_unpack_from, Format,
 )
-from .const import *
-from .dt import txt_date_to_python, bin_date_to_python
+from . import const
+from .dt import (
+    txt_date_to_python, bin_date_to_python, txt_timestamp_to_python,
+    bin_timestamp_to_python)
 from .network import (
     txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
     bin_cidr_to_python)
-from .numeric import bin_numeric_to_python, txt_numeric_to_python
+from . import numeric
 from .text import txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STANDARD_BUF_SIZE = 0x4000
 
 
-header_struct_unpack_from = Struct("!Bi").unpack_from
-int2_struct = Struct('!h')
-int2_struct_unpack = int2_struct.unpack
-int_struct_unpack_from = int_struct.unpack_from
+msg_header_struct_unpack_from = Struct("!Bi").unpack_from
 
-uint_struct = Struct('!I')
-uint_struct_unpack = uint_struct.unpack
+int_struct_unpack_from = Struct('!i').unpack_from
 
-int8_struct = Struct('!q')
-int8_struct_unpack = int8_struct.unpack
-
-float4_struct = Struct('!f')
-float4_struct_unpack = float4_struct.unpack
-float8_struct = Struct('!d')
-float8_struct_unpack = float8_struct.unpack
-
-field_desc_struct = Struct(f"!IhIhih")
+field_desc_struct = Struct("!IhIhih")
 field_desc_struct_size = field_desc_struct.size
 field_desc_struct_unpack_from = field_desc_struct.unpack_from
 
@@ -62,6 +56,7 @@ _STATUS_EXECUTING = 6
 
 
 class ProtocolStatus(enum.IntEnum):
+    """ Protocol status """
     CLOSED = _STATUS_CLOSED
     CLOSING = _STATUS_CLOSING
     CONNECTED = _STATUS_CONNECTED
@@ -72,95 +67,55 @@ class ProtocolStatus(enum.IntEnum):
 
 
 class TransactionStatus(enum.Enum):
+    """ Transaction status """
     UNKNOWN = 0
     IDLE = ord('I')
     TRANSACTION = ord('T')
     ERROR = ord('E')
 
 
-class Format(enum.IntEnum):
-    DEFAULT = -1
-    TEXT = 0
-    BINARY = 1
-
-
 _default_converters = [decode, bytes]
 
 
-def none_to_pg(val: None, oid: int) -> Tuple[int, str, None, int, Format]:
-    return oid, "", None, -1, Format.TEXT
+# pylint: disable-next=unused-argument
+def none_to_pg(val: None) -> Tuple[int, str, None, int, Format]:
+    """ Parameter values for None """
+    return 0, "", None, -1, Format.TEXT
 
 
-def str_to_pg(val: Any, oid: int) -> Tuple[int, str, bytes, int, Format]:
+def str_to_pg(val: str) -> Tuple[int, str, bytes, int, Format]:
+    """ Convert a Python string to a PG text parameter """
     bytes_val = val.encode()
     val_len = len(bytes_val)
     return 0, f"{val_len}s", bytes_val, val_len, Format.TEXT
 
 
-def default_to_pg(val: Any, oid: int) -> Tuple[int, str, bytes, int, Format]:
-    return str_to_pg(str(val), oid)
+def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
+    """ Convert a Python object to a PG text parameter """
+    return str_to_pg(str(val))
 
 
-def int_to_pg(val: int, oid: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
-    if -0x10000000 <= val <= 0x7FFFFFFF and oid != INT8OID:
-        return INT4OID, "i", val, 4, Format.BINARY
+def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
+    """ Convert a Python int to a PG int parameter """
+    if -0x10000000 <= val <= 0x7FFFFFFF:
+        return const.INT4OID, "i", val, 4, Format.BINARY
     if -0x1000000000000000 <= val <= 0x7FFFFFFFFFFFFFFF:
-        return INT8OID, "q", val, 8, Format.BINARY
-    return default_to_pg(val, oid)
+        return const.INT8OID, "q", val, 8, Format.BINARY
+    return default_to_pg(val)
 
 
-def float_to_pg(val: float, oid: int) -> Tuple[int, str, float, int, Format]:
-    return FLOAT8OID, "d", val, 8, Format.BINARY
-
-
-def bool_to_pg(val: bool, oid: int) -> Tuple[int, str, bool, int, Format]:
-    return BOOLOID, "B", val, 1, Format.BINARY
-
-
-def bin_int2_to_python(buf: memoryview) -> Any:
-    return int2_struct_unpack(buf)[0]
-
-
-def bin_int_to_python(buf: memoryview) -> Any:
-    return int_struct_unpack(buf)[0]
-
-
-def bin_uint_to_python(buf: memoryview) -> Any:
-    return uint_struct_unpack(buf)[0]
-
-
-def bin_int8_to_python(buf: memoryview) -> Any:
-    return int8_struct_unpack(buf)[0]
-
-
-def bin_float4_to_python(buf: memoryview) -> Any:
-    return float4_struct_unpack(buf)[0]
-
-
-def bin_float8_to_python(buf: memoryview) -> Any:
-    return float8_struct_unpack(buf)[0]
-
-
-def bin_bool_to_python(buf: memoryview) -> bool:
-    if buf == b'\x01':
-        return True
-    if buf == b'\0':
-        return False
-    raise ProtocolError("Invalid value for bool")
-
-
-def text_bool_to_python(buf: memoryview) -> bool:
-    if buf == b't':
-        return True
-    if buf == b'f':
-        return False
-    raise ProtocolError("Invalid value for bool")
+def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
+    """ Convert a Python bool to a PG bool parameter """
+    return const.BOOLOID, "B", val, 1, Format.BINARY
 
 
 DBConverter = Callable[[memoryview], Any]
 
 
 class _AbstractPGProtocol(ABC):
+    _prepare_threshold: int
+    _cache_size: int
+
     @abstractmethod
     def _set_result(self, result: Any) -> None:
         ...
@@ -175,11 +130,11 @@ class _AbstractPGProtocol(ABC):
 
     @abstractmethod
     def get_buffer(self, sizehint: int) -> memoryview:
-        ...
+        """ Gets a buffer to receive data into. """
 
     @abstractmethod
     def buffer_updated(self, nbytes: int) -> None:
-        ...
+        """ Notify buffer is updated with received data. """
 
     @abstractmethod
     def execute_message(
@@ -189,9 +144,21 @@ class _AbstractPGProtocol(ABC):
         result_format: Format,
         raw_result: bool,
     ) -> List[bytes]:
+        """ Executes a statement. """
+
+    @abstractmethod
+    def handle_message(self, identifier: int, buf: memoryview) -> None:
+        """ Handle a received message """
+
+    @abstractmethod
+    def _setup_ssl_request(self) -> None:
         ...
 
 
+CANCEL_REQUEST_CODE = 80877102
+
+
+# pylint: disable-next=too-many-instance-attributes
 class _BasePGProtocol(_AbstractPGProtocol):
     """ Common functionality for pure python and c accelerated versions of
     the PG protocol class, sync and async.
@@ -200,11 +167,14 @@ class _BasePGProtocol(_AbstractPGProtocol):
     res_converters: Optional[List[DBConverter]]
     _transaction_status: int
     _ex: Optional[ServerError]
+    _status: int
+    _server_parameters: Dict[str, str]
+    _tz_info: Optional[ZoneInfo]
 
     def __init__(self) -> None:
         self._handlers: Dict[int, Callable[[memoryview], None]] = {
             ord(k): v for k, v in [
-                # ' ': self.handle_ssl_response,
+                (' ', self.handle_ssl_response),
                 ('E', self.handle_error),
                 ('R', self.handle_auth_req),
                 ('K', self.handle_backend_key_data),
@@ -212,102 +182,137 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 ('n', self.handle_nodata),
             ]}
         self._backend: Optional[Tuple[int, int]] = None
-        self.password: Union[None, str, bytes] = None
-        self.user: Union[None, str, bytes] = None
+        self.password: Union[None, bytes] = None
+        self.user: Union[None, bytes] = None
+        self.scram_client: Optional[PGScrampClient] = None
+        self._channel_binding: Optional[Tuple[str, bytes]] = None
+        self._ssl_in_use = False
+
+    @property
+    def ssl_in_use(self) -> bool:
+        """ Indicates if SSL is used. """
+        return self._ssl_in_use
 
     @property
     def transaction_status(self) -> TransactionStatus:
+        """ Transaction status """
         return TransactionStatus(self._transaction_status)
 
     @property
-    def server_parameters(self) -> TransactionStatus:
+    def server_parameters(self) -> Dict[str, str]:
+        """ Server parameters """
         return self._server_parameters
 
     @property
     def status(self) -> ProtocolStatus:
+        """ Protocol status """
         return ProtocolStatus(self._status)
 
     @property
     def tz_info(self) -> Union[None, ZoneInfo]:
+        """ Session timezone """
         return self._tz_info
 
+    @property
+    def backend_key(self) -> Tuple[int, int]:
+        """ The backend key data, to send a Cancel Request """
+        if self._backend is None:
+            raise ValueError("No backend key")
+        return self._backend
+
     def handle_message(self, identifier: int, buf: memoryview) -> None:
+        """ Handle a received message """
         self._handlers[identifier](buf)
 
-    def _startup_message(
+    def _startup_message(  # pylint: disable=too-many-arguments
             self, user: Union[str, bytes], database: Optional[str],
             application_name: Optional[str], tz_name: Optional[str],
-            password: Union[None, str, bytes]) -> List[bytes]:
+            password: Union[None, str, bytes], prepare_threshold: int,
+            cache_size: int
+    ) -> bytes:
         parameters = []
         struct_format = ["!ii"]
 
-        for name, value in [
-                ("user", user),
-                ("database", database),
-                ("application_name", application_name),
-                ("timezone", tz_name),
-                ("DateStyle", "ISO"),
-                ("client_encoding", "UTF8\0")]:
+        if isinstance(user, str):
+            user = user.encode()
+
+        for bname, value in [
+                (b"user", user),
+                (b"database", database),
+                (b"application_name", application_name),
+                (b"timezone", tz_name),
+                (b"DateStyle", "ISO"),
+                (b"client_encoding", "UTF8\0")]:
 
             if not value:
                 continue
-            bname = name.encode()
             if isinstance(value, str):
-                bvalue = value.encode()
-            else:
-                bvalue = value
-            struct_format.append(f"{len(bname) + 1}s{len(bvalue) + 1}s")
-            parameters.extend([bname, bvalue])
+                value = value.encode()
+            struct_format.append(f"{len(bname) + 1}s{len(value) + 1}s")
+            parameters.extend([bname, value])
 
         msg_struct = Struct(''.join(struct_format))
-        message = msg_struct.pack(msg_struct.size, 196608, *parameters)
+        message = msg_struct.pack(msg_struct.size, 0x30000, *parameters)
 
         self.user = user
+        if isinstance(password, str):
+            password = password.encode()
         self.password = password
+        self._prepare_threshold = prepare_threshold
+        self._cache_size = cache_size
         self._status = _STATUS_STARTING_UP
         return message
 
+    def cancel_message(self, backend_key: Tuple[int, int]) -> bytes:
+        """ Returns a Cancel Request message. """
+        return pack("!iiii", 16, CANCEL_REQUEST_CODE, *backend_key)
+
     def terminate_message(self) -> bytes:
+        """ Gets a terminate client message. """
         self._status = _STATUS_CLOSING
         return b'X\x00\x00\x00\x04'
 
+    def handle_ssl_response(self, msg_buf: memoryview) -> None:
+        """ Handles response to SSL request """
+        check_length_equal(1, msg_buf)
+        res = msg_buf[0]
+        if res == 83:  # 'S'
+            self._set_result(True)
+        elif res == 78:  # 'N'
+            self._set_result(False)
+        else:
+            raise ProtocolError("Unexpected response from server")
+
+    def _get_ex_val(self, messages: Dict[str, str], key: str) -> str:
+        try:
+            return messages.pop(key)
+        except KeyError:
+            # pylint: disable-next=raise-missing-from
+            raise ProtocolError(f"Missing key '{key}' in Error Response.")
+
     def handle_error(self, buf: memoryview) -> None:
+        """ Interprets and sets a server error. """
         # format: "({error_field_code:char}{error_field_value}\0)+\0"
         if buf[-2:] != b'\0\0':
             raise ProtocolError("Invalid Error Response")
-        all_messages = decode(buf[:-2])
-        messages = {msg[:1]: msg[1:] for msg in all_messages.split('\0')}
-        ex_args: List[Any] = [None] * 17
+        messages = {msg[:1]: msg[1:] for msg in decode(buf[:-2]).split('\0')}
+        ex_args: List[Union[Severity, str, int, None]] = [None] * 17
 
-        try:
-            messages.pop('S')
-        except KeyError:
-            raise ProtocolError(
-                "Missing localized severity 'S' in Error Response")
-        try:
-            severity_str = messages.pop('V')
-        except KeyError:
-            raise ProtocolError(
-                "Missing severity 'V' in Error Response")
-        try:
-            severity = Severity(severity_str)
-        except ValueError:
-            raise ProtocolError(
-                f"Unknown severity '{severity_str}' in Error Response")
-        ex_args[0] = severity
+        self._get_ex_val(messages, 'S')
+        ex_args[0] = Severity(self._get_ex_val(messages, 'V'))
 
-        v: Union[int, str]
-        for k, v in messages.items():
+        value: Union[int, str]
+        for k, value in messages.items():
             if k in ('p', 'P', 'L'):
                 try:
-                    v = int(v)
-                except Exception:
+                    value = int(value)
+                except ValueError:
                     pass
             try:
                 idx = _error_fields[k]
             except KeyError:
                 continue
-            ex_args[idx] = v
+            ex_args[idx] = value
 
         if ex_args[1] is None:
             raise ProtocolError("Missing code in Error Response")
@@ -319,63 +324,100 @@ class _BasePGProtocol(_AbstractPGProtocol):
             ex_class: Type[ServerError] = CachedQueryExpired
         else:
             ex_class = ServerError
-        ex = ex_class(*ex_args)
+        exc = ex_class(*ex_args)
 
-        if severity == Severity.FATAL or severity == Severity.PANIC:
+        if ex_args[0] is Severity.FATAL or ex_args[0] is Severity.PANIC:
             self._close()
-            self._set_exception(ex)
+            self._set_exception(exc)
         elif self._ex is None:
             # non fatal and connected, raise when ready for query arrives
-            self._ex = ex
+            self._ex = exc
+
+    def _handle_md5_auth_req(self, msg_buf: memoryview) -> None:
+        check_length_equal(8, msg_buf)
+        if self.password is None:
+            raise ProtocolError("Missing password")
+        if self.user is None:
+            raise ProtocolError("Missing user")
+        salt, = unpack_from("4s", msg_buf, 4)
+        pw_hash = (b'md5' + md5(md5(
+            self.password + self.user
+        ).hexdigest().encode() + salt).hexdigest().encode())
+
+        pw_len = len(pw_hash) + 1
+        struct_fmt = f'!ci{pw_len}s'
+        self._set_result(
+            pack(struct_fmt, b'p', pw_len + 4, pw_hash))
 
     def handle_auth_req(self, msg_buf: memoryview) -> None:
-        # clear password from the object
-        password = self.password
-        self.password = None
-
+        """ Handles authentication messages """
         specifier, = int_struct_unpack_from(msg_buf)
         if specifier == 0:
             check_length_equal(4, msg_buf)
         elif specifier == 5:
-            check_length_equal(8, msg_buf)
-            user = self.user
-            if password is None:
+            self._handle_md5_auth_req(msg_buf)
+        elif specifier == 10:
+            if self.password is None:
                 raise ProtocolError("Missing password")
-            if user is None:
-                raise ProtocolError("Missing user")
-            salt, = unpack_from("4s", msg_buf, 4)
-            if isinstance(password, str):
-                password = password.encode()
-            if isinstance(user, str):
-                user = user.encode()
-            password = (
-                b'md5' + md5(
-                    md5(password + user).hexdigest().encode() + salt
-                ).hexdigest().encode())
+            # SASL auth
+            if len(msg_buf) < 6 or msg_buf[-2:] != b'\0\0':
+                raise ProtocolError("Invalid SASL message.")
+            mechanisms = decode(msg_buf[4:-2]).split("\0")
+            self.scram_client = PGScrampClient(
+                mechanisms, self.password, self._channel_binding)
 
-            pw_len = len(password) + 1
-            struct_fmt = f'!ci{pw_len}s'
-            self._set_result(
-                pack(struct_fmt, b'p', pw_len + 4, password))
+            client_first = self.scram_client.get_client_first().encode()
+            mechanism = self.scram_client.mechanism_name.encode()
+            cf_len = len(client_first)
+            mech_len = len(mechanism)
+            self._set_result(pack(
+                f"!ci{mech_len + 1}si{cf_len}s",
+                b'p', mech_len + cf_len + 9, mechanism, cf_len, client_first
+            ))
+        elif specifier == 11:
+            # SASL continue
+            if self.scram_client is None:
+                raise ProtocolError("Unexpected SASL continue message.")
+
+            self.scram_client.set_server_first(decode(msg_buf[4:]))
+            msg = self.scram_client.get_client_final()
+            msg_bytes = msg.encode()
+            msg_len = len(msg_bytes)
+            self._set_result(pack(
+                f"!ci{msg_len}s", b'p', msg_len + 4, msg_bytes))
+        elif specifier == 12:
+            # SASL final
+            if self.scram_client is None:
+                raise ProtocolError("Unexpected SASL final message.")
+
+            self.scram_client.set_server_final(decode(msg_buf[4:]))
+
+            # reset scram vars
+            self.scram_client = None
+            self._channel_binding = None
         else:
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")
 
     def handle_backend_key_data(self, msg_buf: memoryview) -> None:
+        """ Handles the backend key """
         self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
+        """ Handles a nodata message """
         check_length_equal(0, msg_buf)
 
     def handle_empty_query_response(self, msg_buf: memoryview) -> None:
+        """ Handles an empty query response. """
         check_length_equal(0, msg_buf)
 
 
-ParamConverter = Callable[[Any, int], Tuple[int, str, Any, int, Format]]
+ParamConverter = Callable[[Any], Tuple[int, str, Any, int, Format]]
 ResConverter = Callable[[memoryview], Any]
 CacheKey = Union[str, Tuple[str, Tuple[int]]]
 
 
+# pylint: disable-next=too-many-instance-attributes
 class PyBasePGProtocol(_AbstractPGProtocol):
     """ Pure Python functionality for both sync and async protocol """
 
@@ -384,7 +426,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
     def __init__(self, *args: Tuple[Any]) -> None:
 
         # cache stuff
-        self._cache: TypingOrderedDict[CacheKey, Dict[str, Any]] = OrderedDict()
+        self._cache: TypingOrderedDict[
+            CacheKey, Dict[str, Any]] = OrderedDict()
         self._cache_item: Optional[Dict[str, Any]] = None
         self._prepare_threshold = 5
         self._cache_size = 100
@@ -395,8 +438,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._bytes_read = 0
         self._buf = self._standard_buf = memoryview(
             bytearray(STANDARD_BUF_SIZE))
-        self._msg_len = 5
-        self._identifier = None
+        self._msg_part_len = 5
+        self._identifier: Optional[int] = None
 
         # resultset vars
         self.res_rows: Optional[List[Tuple[Any, ...]]] = None
@@ -406,7 +449,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._raw_result = False
 
         # return values
-        self._result: Optional[List[Tuple[Optional[List[FieldInfo]], Optional[List[Tuple[Any, ...]]], str]]] = None
+        self._result: Optional[List[Tuple[
+            Optional[List[FieldInfo]],
+            Optional[List[Tuple[Any, ...]]],
+            str,
+        ]]] = None
         self._ex: Optional[ServerError] = None
 
         # status vars
@@ -429,71 +476,98 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 ('Z', self.handle_ready_for_query),
             ]})
         self.value_converters: Dict[int, Tuple[DBConverter, DBConverter]] = {
-            INT2OID: (int, bin_int2_to_python),
-            INT4OID: (int, bin_int_to_python),
-            INT8OID: (int, bin_int8_to_python),
-            FLOAT4OID: (float, bin_float4_to_python),
-            FLOAT8OID: (float, bin_float8_to_python),
-            BOOLOID: (text_bool_to_python, bin_bool_to_python),
-            NUMERICOID: (txt_numeric_to_python, bin_numeric_to_python),
-            NAMEOID: (decode, decode),
-            OIDOID: (int, bin_uint_to_python),
-            CHAROID: (decode, decode),
-            TEXTOID: (decode, decode),
-            VARCHAROID: (decode, decode),
-            BPCHAROID: (decode, decode),
-            BYTEAOID: (txt_bytea_to_python, bytes),
-            INETOID: (txt_inet_to_python, bin_inet_to_python),
-            CIDROID: (txt_cidr_to_python, bin_cidr_to_python),
-            UUIDOID: (txt_uuid_to_python, bin_uuid_to_python),
-            DATEOID: (self.txt_date_to_python, bin_date_to_python),
+            const.INT2OID: (int, numeric.bin_int2_to_python),
+            const.INT4OID: (int, numeric.bin_int_to_python),
+            const.INT8OID: (int, numeric.bin_int8_to_python),
+            const.FLOAT4OID: (float, numeric.bin_float4_to_python),
+            const.FLOAT8OID: (float, numeric.bin_float8_to_python),
+            const.BOOLOID: (
+                numeric.text_bool_to_python, numeric.bin_bool_to_python),
+            const.NUMERICOID: (
+                numeric.txt_numeric_to_python, numeric.bin_numeric_to_python),
+            const.NAMEOID: (decode, decode),
+            const.OIDOID: (int, numeric.bin_uint_to_python),
+            const.CHAROID: (decode, decode),
+            const.TEXTOID: (decode, decode),
+            const.VARCHAROID: (decode, decode),
+            const.BPCHAROID: (decode, decode),
+            const.BYTEAOID: (txt_bytea_to_python, bytes),
+            const.INETOID: (txt_inet_to_python, bin_inet_to_python),
+            const.CIDROID: (txt_cidr_to_python, bin_cidr_to_python),
+            const.UUIDOID: (txt_uuid_to_python, bin_uuid_to_python),
+            const.DATEOID: (self.txt_date_to_python, bin_date_to_python),
+            const.TIMESTAMPOID: (
+                self.txt_timestamp_to_python, bin_timestamp_to_python),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: int_to_pg,
             str: str_to_pg,
             type(None): none_to_pg,
-            float: float_to_pg,
+            float: numeric.float_to_pg,
             bool: bool_to_pg,
         }
 
     def get_buffer(self, sizehint: int) -> memoryview:
+        """ Gets a buffer to receive data into. """
         buf = self._buf
         if self._bytes_read:
             buf = buf[self._bytes_read:]
         return buf
 
     def buffer_updated(self, nbytes: int) -> None:
+        """ Notify buffer is updated with received data. """
+        # PostgreSQL message contains of a fixed 5 byte header and optional
+        # content:
+        #   header: 1 byte identifier + 4 byte length of message
         self._bytes_read += nbytes
         msg_start = 0
 
-        while self._bytes_read >= self._msg_len:
+        while self._bytes_read >= self._msg_part_len:
+            # read in two stages, first header, then content
             if self._identifier is None:
-                self._identifier, new_msg_len = header_struct_unpack_from(
+                # read header
+                self._identifier, msg_len = msg_header_struct_unpack_from(
                     self._standard_buf, msg_start)
-                new_msg_len -= 4
-                if new_msg_len < 0:
+
+                # msg_len includes msg_len itself, so subtract 4
+                msg_part_len = msg_len - 4
+                if msg_part_len < 0:
                     raise ProtocolError("Negative message length")
-                if new_msg_len > STANDARD_BUF_SIZE:
-                    self._buf = memoryview(bytearray(new_msg_len))
+
+                if msg_part_len > STANDARD_BUF_SIZE:
+                    # message does not fit in standard buf, allocate
+                    # XL buffer
+                    self._buf = memoryview(bytearray(msg_part_len))
             else:
+                # content is present, handle the message
                 self.handle_message(
                     self._identifier,
-                    self._buf[msg_start:msg_start + self._msg_len])
+                    self._buf[msg_start:msg_start + self._msg_part_len])
+
+                # if XL buffer was used, it is discarded now
                 self._buf = self._standard_buf
-                new_msg_len = 5
+
+                # set up for reading header again
+                msg_part_len = 5
                 self._identifier = None
 
-            self._bytes_read -= self._msg_len
-            msg_start += self._msg_len
-            self._msg_len = new_msg_len
+            # set up for reading the next stage
+            self._bytes_read -= self._msg_part_len
+            msg_start += self._msg_part_len
+            self._msg_part_len = msg_part_len
 
         if self._bytes_read and msg_start:
             # move incomplete trailing message part to start of buffer
             self._buf[:self._bytes_read] = (
                 self._standard_buf[msg_start:msg_start + self._bytes_read])
 
+    def _setup_ssl_request(self) -> None:
+        self._identifier = 32  # pseudo identifier, not set by server
+        self._msg_part_len = 1
+
     def convert_param(self, param: Any) -> Tuple[int, str, Any, int, Format]:
-        return self.param_converters.get(type(param), default_to_pg)(param, 0)
+        """ Convert a Python value into a PostgreSQL param tuple. """
+        return self.param_converters.get(type(param), default_to_pg)(param)
 
     def _close_statement_msg(self, stmt_name: bytes) -> bytes:
         name_len = len(stmt_name)
@@ -507,7 +581,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
     def _parse_msg(
             self, sql: str, stmt_name: bytes, param_oids: Tuple[int, ...]
-        ) -> bytes:
+    ) -> bytes:
         sql_bytes = sql.encode()
         sql_len = len(sql_bytes)
         stmt_name_len = len(stmt_name)
@@ -518,7 +592,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             b"P", stmt_name_len + sql_len + 8 + num_params * 4,
             stmt_name, sql_bytes, num_params, *param_oids)
 
-    def _bind_msg(
+    def _bind_msg(  # pylint: disable=too-many-arguments
             self,
             stmt_name: bytes,
             param_vals: Tuple[bytes],
@@ -526,7 +600,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             param_lens: Tuple[int],
             param_fmts: Tuple[int],
             result_format: Format,
-        ) -> bytes:
+    ) -> bytes:
 
         stmt_name_len = len(stmt_name)
         num_params = len(param_fmts)
@@ -553,34 +627,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             b"B", bind_length, b'', stmt_name, num_params,
             *param_fmts, num_params, *param_pg_vals, 1, result_format)
 
-    def execute_message(
-            self,
-            sql: str,
-            parameters: Tuple[Any, ...],
-            result_format: Format,
-            raw_result: bool,
-    ) -> List[bytes]:
-        message = []
-
-        if self._stmt_to_close is not None:
-            message.append(
-                self._close_statement_msg(self._stmt_to_close["name"]))
-
-        param_oids: Tuple[int]
-        if parameters:
-            param_oids, param_structs, param_vals, param_lens, param_fmts = zip(
-                *(self.convert_param(p) for p in parameters))
-        else:
-            param_oids = cast(Tuple[int], ())
-            param_structs = param_vals = param_lens = param_fmts = ()
+    def _check_cache(
+            self, sql: str, param_oids: Tuple[int]) -> Tuple[bytes, bool]:
 
         stmt_name = b''
-
         prepared = False
-        cache_item = None
         if self._prepare_threshold:
-            cache_key: CacheKey = (sql, param_oids) if parameters else sql
-            cache_item = self._cache.get(cache_key)
+            self.cache_key = (sql, param_oids) if param_oids else sql
+            self._cache_item = cache_item = self._cache.get(self.cache_key)
             if cache_item is not None:
                 # statement executed before
                 if cache_item["prepared"]:
@@ -591,10 +645,39 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                         # Reuse server side statement and skip parsing
                         prepared = True
                         stmt_name = cache_item["name"]
+                        self.res_fields = cache_item["res_fields"]
+                        self.res_converters = cache_item["res_converters"]
+                        self.res_rows = None if self.res_fields is None else []
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
                         # Using a non-empty statement name for reuse
                         stmt_name = cache_item["name"]
+        return stmt_name, prepared
+
+    def execute_message(
+            self,
+            sql: str,
+            parameters: Tuple[Any, ...],
+            result_format: Format,
+            raw_result: bool,
+    ) -> List[bytes]:
+        """ Executes a statement. """
+
+        message = []
+
+        if self._stmt_to_close is not None:
+            message.append(
+                self._close_statement_msg(self._stmt_to_close["name"]))
+
+        if parameters:
+            (param_oids, param_structs, param_vals, param_lens,
+             param_fmts) = zip(
+                *(self.convert_param(p) for p in parameters))
+        else:
+            param_oids = cast(Tuple[int], ())
+            param_structs = param_vals = param_lens = param_fmts = ()
+
+        stmt_name, prepared = self._check_cache(sql, param_oids)
 
         if (not parameters
                 and result_format in (Format.TEXT, Format.DEFAULT)
@@ -623,15 +706,6 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             message.append(
                 b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
 
-        # Set up for results
-        if self._prepare_threshold:
-            self.cache_key = cache_key
-            self._cache_item = cache_item
-            if prepared:
-                # initialize result from cache
-                self.res_fields = cache_item["res_fields"]
-                self.res_converters = cache_item["res_converters"]
-                self.res_rows = None if self.res_fields is None else []
         self._result = []
         self._status = _STATUS_EXECUTING
         self._result_format = result_format
@@ -640,6 +714,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         return message
 
     def handle_parameter_status(self, msg_buf: memoryview) -> None:
+        """ Handles a server parameter """
         # format: "{param_name}\0{param_value}\0"
 
         param = bytes(msg_buf)
@@ -662,15 +737,18 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._server_parameters[name] = val
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
+        """ Handles a Parse Complete message """
         check_length_equal(0, msg_buf)
         if (self._cache_item is not None and
                 self._cache_item["num_executed"] == self._prepare_threshold):
             self._cache_item["prepared"] = True
 
     def handle_bind_complete(self, msg_buf: memoryview) -> None:
+        """ Handles a Bind Complete message """
         check_length_equal(0, msg_buf)
 
     def handle_close_complete(self, msg_buf: memoryview) -> None:
+        """ Handles a Close Complete message """
         check_length_equal(0, msg_buf)
         if self._stmt_to_close is None:
             raise ProtocolError("Unexpected close complete message.")
@@ -682,9 +760,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._stmt_to_close = None
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
+        """ Handles a nodata message """
         check_length_equal(0, msg_buf)
 
     def handle_row_description(self, msg_buf: memoryview) -> None:
+        """ Handles a Row Description message. """
         buffer = bytes(msg_buf)
         res_fields = []
         converters = []
@@ -695,6 +775,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             try:
                 zero_idx = buffer.index(0, offset)
             except ValueError:
+                # pylint: disable-next=raise-missing-from
                 raise ProtocolError("Invalid row description")
             field_name = decode(msg_buf[offset:zero_idx])
             offset = zero_idx + 1
@@ -703,8 +784,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             res_fields.append(FieldInfo(
                 field_name, table_oid, col_num, type_oid, type_size, type_mod,
                 _format))
-            converters.append(
-                self.value_converters.get(type_oid, _default_converters)[_format])
+            converters.append(self.value_converters.get(
+                type_oid, _default_converters)[_format])
             offset += field_desc_struct_size
         if offset != len(msg_buf):
             raise ProtocolError("Additional data after row description")
@@ -717,21 +798,27 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 res_fields=res_fields, res_converters=converters)
 
     def handle_data_row(self, buf: memoryview) -> None:
-        value_converters = self.res_converters
-        if value_converters is None:
+        """ Handles a DataRow message. """
+        if self.res_converters is None or self.res_rows is None:
             raise ProtocolError("Unexpected data row.")
-        if ushort_struct_unpack_from(buf)[0] != len(value_converters):
+
+        num_converters = len(self.res_converters)
+        if ushort_struct_unpack_from(buf)[0] != num_converters:
             raise ProtocolError("Invalid number of row values")
+
+        value_converters: Iterable[Callable[[memoryview], Any]]
         if self._raw_result:
             if self._result_format == Format.TEXT:
-                value_converters = repeat(decode, len(value_converters))
+                value_converters = repeat(decode, num_converters)
             else:
-                value_converters = repeat(bytes, len(value_converters))
+                value_converters = repeat(bytes, num_converters)
+        else:
+            value_converters = self.res_converters
 
         def get_vals() -> Generator[Any, None, None]:
             offset = 2
             for converter in value_converters:
-                val_len = int_struct_unpack_from(buf, offset)[0]
+                val_len, = int_struct_unpack_from(buf, offset)
                 offset += 4
                 if val_len == -1:
                     yield None
@@ -744,22 +831,27 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             if offset != len(buf):
                 raise ProtocolError("Additional data after data row")
 
-        if self.res_rows is None:
-            raise ProtocolError("Unexpected data row")
         self.res_rows.append(tuple(get_vals()))
 
     def handle_command_complete(self, msg_buf: memoryview) -> None:
+        """ Handles a Command Complete message. """
         if msg_buf[-1] != 0:
             raise ProtocolError("Invalid command complete message")
         if self._result is None:
             raise ProtocolError("Unexpected close message.")
+        command_tag = decode(msg_buf[:-1])
+        # if command_tag in ("DISCARD ALL", "DEALLOCATE ALL"):
+        #     self._cache.clear()
         self._result.append((
-            self.res_fields, self.res_rows, decode(msg_buf[:-1])))
+            self.res_fields, self.res_rows, command_tag))
         self.res_fields = None
         self.res_converters = None
         self.res_rows = None
 
-    def _handle_ready_cache(self):
+    def _handle_ready_cache(self) -> None:
+
+        if self.cache_key is None:
+            return
 
         cache_item = self._cache_item
         if cache_item is None:
@@ -802,6 +894,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.cache_key = None
 
     def handle_ready_for_query(self, msg_buf: memoryview) -> None:
+        """ Handles a Ready for Query message. """
         self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
@@ -815,7 +908,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             self._set_result(self._result)
         self._result = None
 
-    def txt_date_to_python(self, buf: memoryview):
+    def txt_date_to_python(self, buf: memoryview) -> Union[str, date]:
+        """ Converts PG textual date value to a Python date if possible. """
         if self._iso_dates:
             return txt_date_to_python(buf)
+        return decode(buf)
+
+    def txt_timestamp_to_python(self, buf: memoryview) -> Union[str, date]:
+        """ Converts PG textual date value to a Python date if possible. """
+        if self._iso_dates:
+            return txt_timestamp_to_python(buf)
         return decode(buf)

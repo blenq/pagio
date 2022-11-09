@@ -32,6 +32,7 @@ INETOID = 869
 
 # date/time
 DATEOID = 1082
+TIMESTAMPOID = 1114
 
 # uuid
 UUIDOID = 2950
