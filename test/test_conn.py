@@ -199,6 +199,15 @@ class ConnCase(unittest.TestCase):
                 res = cn.execute("SELECT * FROM test_val")
             cn.execute("ROLLBACK")
 
+    def test_cache_change_format(self):
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("SELECT 16")
+            cn.execute("SELECT 16")
+            res = cn.execute("SELECT 16", result_format=Format.TEXT)
+            self.assertEqual(16, res.rows[0][0])
+            res = cn.execute("SELECT 16", result_format=Format.BINARY)
+            self.assertEqual(16, res.rows[0][0])
+
 
 class PyConnCase(ConnCase):
     @classmethod

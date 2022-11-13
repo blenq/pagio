@@ -10,7 +10,7 @@ from itertools import repeat
 from struct import Struct, unpack_from, pack
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
-    Type, OrderedDict as TypingOrderedDict, Iterable)
+    Type, OrderedDict as TypingOrderedDict, Iterable, TypedDict)
 
 from .pgscramp import PGScrampClient
 
@@ -418,6 +418,15 @@ ResConverter = Callable[[memoryview], Any]
 CacheKey = Union[str, Tuple[str, Tuple[int]]]
 
 
+class Statement(TypedDict):
+    prepared: bool
+    num_executed: int
+    res_fields: Optional[FieldInfo]
+    bin_converters: Optional[List[ResConverter]]
+    txt_converters: Optional[List[ResConverter]]
+    name: bytes
+
+
 # pylint: disable-next=too-many-instance-attributes
 class PyBasePGProtocol(_AbstractPGProtocol):
     """ Pure Python functionality for both sync and async protocol """
@@ -428,7 +437,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         # cache stuff
         self._cache: TypingOrderedDict[
-            CacheKey, Dict[str, Any]] = OrderedDict()
+            CacheKey, Statement] = OrderedDict()
         self._cache_item: Optional[Dict[str, Any]] = None
         self._prepare_threshold = 5
         self._cache_size = 100
@@ -661,10 +670,19 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 result_format = Format.TEXT
             else:
                 result_format = Format.BINARY
-        if prepared and self.res_fields:
-            self.res_converters = cache_item["res_converters"][result_format]
-            if self.res_converters is not None:
-                self.res_rows = []
+        if prepared and self.res_fields is not None:
+            if result_format == Format.TEXT:
+                conv_attr = "txt_converters"
+            else:
+                conv_attr = "bin_converters"
+            if cache_item[conv_attr] is None:
+                cache_item[conv_attr] = [
+                    self.value_converters.get(
+                        f_info.type_oid, _default_converters
+                    )[result_format] for f_info in self.res_fields]
+
+            self.res_converters = cache_item[conv_attr]
+            self.res_rows = []
         return stmt_name, prepared, result_format
 
     def execute_message(
@@ -687,7 +705,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
              param_fmts) = zip(
                 *(self.convert_param(p) for p in parameters))
         else:
-            param_oids = cast(Tuple[int], ())
+            param_oids = cast(Tuple[int, ...], ())
             param_structs = param_vals = param_lens = param_fmts = ()
 
         stmt_name, prepared, result_format = self._check_cache(
@@ -709,8 +727,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 stmt_name, param_vals, param_structs, param_lens, param_fmts,
                 result_format))
 
-            if not prepared or (
-                    self.res_fields and self.res_converters is None):
+            if not prepared:
                 # Describe
                 message.append(b'D\x00\x00\x00\x06P\x00')
 
@@ -806,7 +823,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_converters = converters
         if self._cache_item is not None and self._cache_item["prepared"]:
             # store field_info and converters in cache
-            self._cache_item["res_converters"][_format] = converters
+            if _format == Format.TEXT:
+                conv_attr = "txt_converters"
+            else:
+                conv_attr = "bin_converters"
+            self._cache_item[conv_attr] = converters
             self._cache_item["res_fields"] = res_fields
 
     def handle_data_row(self, buf: memoryview) -> None:
@@ -886,7 +907,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                     "prepared": False,
                     "num_executed": 1,
                     "res_fields": None,
-                    "res_converters": [None, None],
+                    "bin_converters": None,
+                    "txt_converters": None,
                     "name": stmt_name,
                 }
         else:
