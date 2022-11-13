@@ -5,13 +5,17 @@
 
 PyObject *
 convert_pg_float_text(PPObject *self, char *buf, int len) {
-    char data[len + 1];
+    char *data, *pend;
     double val;
-	char *pend;
 
+    data = PyMem_Malloc(len + 1);
+    if (data == NULL) {
+        return PyErr_NoMemory();
+    }
     memcpy(data, buf, len);
-    data[len] = 0;
+    data[len] = '\0';
 	val = PyOS_string_to_double(data, &pend, PyExc_ValueError);
+	PyMem_Free(data);
 	if (val == -1.0 && PyErr_Occurred())
 		return NULL;
 	if (pend != data + len) {
