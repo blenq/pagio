@@ -3,7 +3,7 @@
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
-from datetime import date
+from datetime import date, datetime
 import enum
 from hashlib import md5
 from itertools import repeat
@@ -22,7 +22,8 @@ from .common import (
 from . import const
 from .dt import (
     txt_date_to_python, bin_date_to_python, txt_timestamp_to_python,
-    bin_timestamp_to_python)
+    bin_timestamp_to_python, txt_timestamptz_to_python,
+    bin_timestamptz_to_python)
 from .network import (
     txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
     bin_cidr_to_python)
@@ -498,6 +499,10 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             const.DATEOID: (self.txt_date_to_python, bin_date_to_python),
             const.TIMESTAMPOID: (
                 self.txt_timestamp_to_python, bin_timestamp_to_python),
+            const.TIMESTAMPTZOID: (
+                self.txt_timestamptz_to_python,
+                self.bin_timestamptz_to_python,
+            ),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: int_to_pg,
@@ -628,7 +633,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             *param_fmts, num_params, *param_pg_vals, 1, result_format)
 
     def _check_cache(
-            self, sql: str, param_oids: Tuple[int]) -> Tuple[bytes, bool]:
+            self, sql: str, param_oids: Tuple[int], result_format: Format
+    ) -> Tuple[bytes, bool, Format]:
 
         stmt_name = b''
         prepared = False
@@ -646,13 +652,20 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                         prepared = True
                         stmt_name = cache_item["name"]
                         self.res_fields = cache_item["res_fields"]
-                        self.res_converters = cache_item["res_converters"]
-                        self.res_rows = None if self.res_fields is None else []
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
                         # Using a non-empty statement name for reuse
                         stmt_name = cache_item["name"]
-        return stmt_name, prepared
+        if result_format == Format.DEFAULT:
+            if not param_oids and not prepared and not stmt_name:
+                result_format = Format.TEXT
+            else:
+                result_format = Format.BINARY
+        if prepared and self.res_fields:
+            self.res_converters = cache_item["res_converters"][result_format]
+            if self.res_converters is not None:
+                self.res_rows = []
+        return stmt_name, prepared, result_format
 
     def execute_message(
             self,
@@ -677,14 +690,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             param_oids = cast(Tuple[int], ())
             param_structs = param_vals = param_lens = param_fmts = ()
 
-        stmt_name, prepared = self._check_cache(sql, param_oids)
+        stmt_name, prepared, result_format = self._check_cache(
+            sql, param_oids, result_format)
 
         if (not parameters
-                and result_format in (Format.TEXT, Format.DEFAULT)
+                and result_format == Format.TEXT
                 and not prepared
                 and not stmt_name):
             # Use simple query
-            result_format = Format.TEXT
             message.append(self._simple_query_msg(sql))
         else:
             if not prepared:
@@ -692,13 +705,12 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 message.append(self._parse_msg(sql, stmt_name, param_oids))
 
             # Bind
-            if result_format == Format.DEFAULT:
-                result_format = Format.BINARY
             message.append(self._bind_msg(
                 stmt_name, param_vals, param_structs, param_lens, param_fmts,
                 result_format))
 
-            if not prepared:
+            if not prepared or (
+                    self.res_fields and self.res_converters is None):
                 # Describe
                 message.append(b'D\x00\x00\x00\x06P\x00')
 
@@ -756,7 +768,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         # Reset the statement
         self._stmt_to_close.update(
             prepared=False, num_executed=0, res_fields=None,
-            res_converters=None)
+            res_converters=[None, None])
         self._stmt_to_close = None
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
@@ -794,8 +806,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_converters = converters
         if self._cache_item is not None and self._cache_item["prepared"]:
             # store field_info and converters in cache
-            self._cache_item.update(
-                res_fields=res_fields, res_converters=converters)
+            self._cache_item["res_converters"][_format] = converters
+            self._cache_item["res_fields"] = res_fields
 
     def handle_data_row(self, buf: memoryview) -> None:
         """ Handles a DataRow message. """
@@ -874,7 +886,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                     "prepared": False,
                     "num_executed": 1,
                     "res_fields": None,
-                    "res_converters": None,
+                    "res_converters": [None, None],
                     "name": stmt_name,
                 }
         else:
@@ -914,8 +926,29 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             return txt_date_to_python(buf)
         return decode(buf)
 
-    def txt_timestamp_to_python(self, buf: memoryview) -> Union[str, date]:
-        """ Converts PG textual date value to a Python date if possible. """
+    def txt_timestamp_to_python(self, buf: memoryview) -> Union[str, datetime]:
+        """ Converts PG textual timestamp value to a Python datetime if
+        possible.
+
+        """
         if self._iso_dates:
             return txt_timestamp_to_python(buf)
         return decode(buf)
+
+    def txt_timestamptz_to_python(
+            self, buf: memoryview) -> Union[str, datetime]:
+        """ Converts PG textual timestamptz value to a Python datetime with
+        tzinfo if possible.
+
+        """
+        if self._iso_dates:
+            return txt_timestamptz_to_python(buf)
+        return decode(buf)
+
+    def bin_timestamptz_to_python(
+            self, buf: memoryview) -> Union[str, datetime]:
+        """ Converts PG binary timestamptz value to a Python datetime with
+        tzinfo if possible.
+
+        """
+        return bin_timestamptz_to_python(buf, self._tz_info)

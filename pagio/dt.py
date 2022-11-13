@@ -1,9 +1,9 @@
 """ Date/time type conversion functions """
 import sys
 from codecs import decode
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 import re
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 
 from .common import ProtocolError
 from .numeric import bin_int_to_python, bin_int8_to_python
@@ -11,7 +11,8 @@ from .numeric import bin_int_to_python, bin_int8_to_python
 
 __all__ = [
     "txt_date_to_python", "bin_date_to_python", "txt_timestamp_to_python",
-    "bin_timestamp_to_python",
+    "bin_timestamp_to_python", "txt_timestamptz_to_python",
+    "bin_timestamptz_to_python",
 ]
 
 
@@ -83,15 +84,63 @@ else:
     _from_isoformat = datetime.fromisoformat
 
 
+timestamp_re = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$",
+    re.ASCII)
+
+
 def txt_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
     # String is in the form "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}][ BC]
     # Python datetime range can only handle 4 digit year without 'BC' suffix
     ts_str = decode(buf)
-    if len(ts_str) > 4 and ts_str[4] == '-' and ts_str[-1] != 'C':
-        # within Python range
-        return _from_isoformat(ts_str)
+    match = timestamp_re.match(ts_str)
+    if match:
+        usec = match.group(7)
+        if usec is None:
+            usec = 0
+        else:
+            usec = int(usec + "0" * (6 - len(usec)))
+        try:
+            return datetime(
+                *(int(g) for g in match.group(1, 2, 3, 4, 5, 6)), usec)
+        except ValueError:
+            pass
+    return ts_str
+
+timestamptz_re = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?"
+    r"([-+])(\d{2})(?::(\d{2})(?::(\d{2}))?)?$",
+    re.ASCII)
+
+
+def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
+    """ Converts PG textual timestamp value in ISO format to Python datetime.
+    """
+    # String is in the form "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}][ BC]
+    # Python datetime range can only handle 4 digit year without 'BC' suffix
+    ts_str = decode(buf)
+    match = timestamptz_re.match(ts_str)
+    if match:
+        usec = match.group(7)
+        if usec is None:
+            usec = 0
+        else:
+            usec = int(usec + "0" * (6 - len(usec)))
+
+        tz_minutes = int(match.group(10) or 0)
+        tz_seconds = int(match.group(11) or 0)
+        tz_timedelta = timedelta(
+            hours=int(match.group(9)), minutes=tz_minutes, seconds=tz_seconds)
+        if match.group(8) == '-':
+            tz_timedelta *= -1
+        try:
+            return datetime(
+                *(int(g) for g in match.group(1, 2, 3, 4, 5, 6)), usec,
+                timezone(tz_timedelta))
+        except ValueError:
+            pass
     return ts_str
 
 
@@ -144,4 +193,47 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
     usec = str(usec).rstrip("0") if usec else ""
 
     return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}{7}".format(
+        year, month, day, hour, minute, sec, usec, bc_suffix)
+
+
+def bin_timestamptz_to_python(
+        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
+    """ Converts PG binary timestamp value to Python datetime """
+    value = bin_int8_to_python(buf)
+
+    # special values
+    if value == 0x7FFFFFFFFFFFFFFF:
+        return 'infinity'
+    if value == -0x8000000000000000:
+        return '-infinity'
+    pg_ordinal, tm = divmod(value, USECS_PER_DAY)
+    hour, minute, sec, usec = _time_vals_from_int(tm)
+
+    if MIN_PG_ORDINAL <= pg_ordinal <= MAX_PG_ORDINAL:
+        try:
+            dt = datetime.combine(
+                date.fromordinal(pg_ordinal + DATE_OFFSET),
+                time(hour, minute, sec, usec), tzinfo=timezone.utc)
+            if tzinfo is not None:
+                dt = dt.astimezone(tzinfo)
+            return dt
+        except (OverflowError, ValueError):
+            pass
+
+    # Outside python date range, convert to a string identical to PG ISO text
+    # format
+    year, month, day = _date_vals_from_int(pg_ordinal)
+
+    if year < 1:
+        # display value of negative year including correction for non
+        # existing year 0
+        year = -1 * year + 1
+        bc_suffix = " BC"
+    else:
+        bc_suffix = ""
+
+    # strip trailing millisecond zeroes
+    usec = str(usec).rstrip("0") if usec else ""
+
+    return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}+00:00{7}".format(
         year, month, day, hour, minute, sec, usec, bc_suffix)

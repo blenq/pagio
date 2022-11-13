@@ -1,10 +1,11 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
 import unittest
 from uuid import UUID
 
 from pagio import Connection, sync_connection, sync_protocol, Format
+from pagio.zoneinfo import ZoneInfo
 
 
 class ConnTypeCase(unittest.TestCase):
@@ -136,6 +137,9 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '2021-03-15 14:10:03.02'::timestamp",
             datetime(2021, 3, 15, 14, 10, 3, 20000))
         self._test_val_result(
+            "SELECT '2021-03-15 14:10:03.002'::timestamp",
+            datetime(2021, 3, 15, 14, 10, 3, 2000))
+        self._test_val_result(
             "SELECT '2021-03-15 14:10:03.0002'::timestamp",
             datetime(2021, 3, 15, 14, 10, 3, 200))
         self._test_val_result(
@@ -166,6 +170,88 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '2021-03-15 14:10:03'::timestamp",
             result_format=Format.BINARY)
         self.assertEqual(datetime(2021, 3, 15, 14, 10, 3), res[0][0])
+
+    def _test_tstz_val(self, sql, val):
+        res = self._cn.execute(sql)
+        res_val = res[0][0]
+        self.assertEqual(val, res_val)
+        self.assertEqual(val.tzinfo, res_val.tzinfo)
+        res = self._cn.execute(sql, result_format=Format.TEXT)
+        res_val = res[0][0]
+        self.assertEqual(val, res_val)
+        self.assertEqual(val.tzinfo, res_val.tzinfo)
+        res = self._cn.execute(sql, result_format=Format.BINARY)
+        res_val = res[0][0]
+        self.assertEqual(val, res_val)
+        if self._cn.tz_info is not None:
+            self.assertEqual(
+                val.tzinfo.utcoffset(val.replace(tzinfo=None)),
+                res_val.tzinfo.utcoffset(res_val.replace(tzinfo=None)))
+
+    def test_timestamptz_result(self):
+        self._cn.execute("SET TIMEZONE TO 'Europe/Berlin'")
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, tzinfo=timezone(timedelta(hours=1))))
+        self._cn.execute("SET TIMEZONE TO 'Europe/Berlin'")
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.2'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 200000, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.02'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 20000, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.002'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 2000, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.0002'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 200, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.00002'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 20, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03.000002'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, 2, tzinfo=timezone(
+                    timedelta(hours=1))))
+        self._cn.execute("SET TIMEZONE TO '-02:30'")
+        self._test_tstz_val(
+            "SELECT '2021-03-15 14:10:03'::timestamptz", datetime(
+                2021, 3, 15, 14, 10, 3, tzinfo=timezone(
+                    timedelta(hours=2, minutes=30))))
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03 BC'::timestamptz",
+            result_format=Format.TEXT)
+        self.assertEqual('2021-03-15 14:10:03+02:30 BC', res.rows[0][0])
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03 BC'::timestamptz",
+            result_format=Format.BINARY)
+        self.assertEqual('2021-03-15 11:40:03+00:00 BC', res.rows[0][0])
+        self._test_val_result(
+            "SELECT 'infinity'::timestamptz", 'infinity')
+        self._test_val_result(
+            "SELECT '-infinity'::timestamptz", '-infinity')
+        self._cn.execute("SET TIMEZONE TO 'America/Chicago'")
+        self._cn.execute("SET DateStyle TO postgres, dmy")
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03'::timestamptz",
+            result_format=Format.TEXT)
+        self.assertEqual("Mon 15 Mar 14:10:03 2021 CDT", res[0][0])
+        res = self._cn.execute(
+            "SELECT '2021-03-15 14:10:03'::timestamptz",
+            result_format=Format.BINARY)
+        self.assertEqual(datetime(2021, 3, 15, 14, 10, 3, tzinfo=ZoneInfo("America/Chicago")), res[0][0])
+        # self._test_val_result(
+        #     "SELECT '0002-03-15 14:10:03 BC'::timestamp",
+        #     '0002-03-15 14:10:03 BC')
+        # self._test_val_result(
+        #     "SELECT 'infinity'::timestamp", 'infinity')
+        # self._test_val_result(
+        #     "SELECT '-infinity'::timestamp", '-infinity')
 
 
 class PyConnTypeCase(ConnTypeCase):
