@@ -8,7 +8,8 @@ except ImportError:
 
 from pagio import (
     AsyncConnection, TransactionStatus, ProtocolStatus, ServerError, Format,
-    async_connection, async_protocol, CachedQueryExpired)
+    async_connection, async_protocol, CachedQueryExpired,
+    StatementDoesNotExist)
 
 
 class ConnCase(IsolatedAsyncioTestCase):
@@ -211,6 +212,27 @@ class ConnCase(IsolatedAsyncioTestCase):
             except asyncio.TimeoutError:
                 pass
             self.assertEqual(ProtocolStatus.READY_FOR_QUERY, cn.status)
+
+    async def test_discard_one(self):
+        async with await AsyncConnection(
+                database="postgres", prepare_threshold=1) as cn:
+            await cn.execute("SELECT 1")
+            await cn.execute("SELECT 1")
+
+            # statement is prepared now, deallocate to confuse cache
+            res = await cn.execute("SELECT name FROM pg_prepared_statements;")
+            await cn.execute("DEALLOCATE " + res.rows[0][0])
+
+            # should recover from error and successfully execute
+            res = await cn.execute("SELECT 1")
+            self.assertEqual(1, res.rows[0][0])
+
+            res = await cn.execute("SELECT 1")
+            await cn.execute("BEGIN")
+            res = await cn.execute("SELECT name FROM pg_prepared_statements")
+            await cn.execute("DEALLOCATE  " + res.rows[0][0])
+            with self.assertRaises(StatementDoesNotExist):
+                await cn.execute("SELECT 1")
 
 
 class PyConnCase(ConnCase):

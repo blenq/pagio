@@ -191,6 +191,213 @@ convert_pg_timestamp_bin(PPObject *self, char *buf, int len) {
 }
 
 
+PyObject *
+convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
+{
+    unsigned int year, month, day, minute, hour, second, usec = 0,
+        tz_hour, tz_minute = 0, tz_second = 0;
+    int num_read, pos;
+    char *date_str, tz_sign;
+    PyObject *dt = NULL, *td = NULL, *tz = NULL;
+
+    if (!self->iso_dates || len < 22 || buf[4] != '-' || buf[len - 1] == 'C') {
+        // Not an iso string within Python range
+        return NULL;
+    }
+    date_str = PyMem_Malloc(len + 1);
+    if (date_str == NULL) {
+        return PyErr_NoMemory();
+    }
+    memcpy(date_str, buf, len);
+    date_str[len] = '\0';
+//    fprintf(stderr, "%s\n", date_str);
+    num_read = sscanf(
+        date_str, "%4u-%2u-%2u %2u:%2u:%2u", &year, &month, &day, &hour,
+        &minute, &second);
+    if (num_read != 6) {
+        goto end;
+    }
+    if (year == 0) {
+        goto end;
+    }
+//    fprintf(stderr, "wow\n");
+    if (date_str[19] == '.') {
+//        fprintf(stderr, "Nope\n");
+        int i;
+        num_read = sscanf(date_str + 20, "%6u%n", &usec, &pos);
+        if (num_read != 1) {
+            goto end;
+        }
+        for (i = 6; i > pos; i--) {
+            usec *= 10;
+        }
+        pos += 20;
+    }
+    else {
+        pos = 19;
+    }
+//    fprintf(stderr, "wow 1\n");
+//    fprintf(stderr, "pos %d\n", pos);
+    if (pos == len) {
+        goto end;
+    }
+    tz_sign = date_str[pos];
+    pos += 1;
+    if (pos == len) {
+        goto end;
+    }
+//    fprintf(stderr, "wow 2\n");
+    num_read = sscanf(
+        date_str + pos, "%2u:%2u:%2u", &tz_hour, &tz_minute, &tz_second);
+    if (num_read == 0) {
+        goto end;
+    }
+//    fprintf(stderr, "wow 3\n");
+    if (tz_hour > 23 || tz_minute > 59 || tz_second > 59) {
+        goto end;
+    }
+//    fprintf(stderr, "%02u:%02u:%02u", tz_hour, tz_minute, tz_second);
+//    fprintf(stderr, "pos %d\n", pos + 3 * num_read - 1);
+    if (pos + 3 * num_read - 1 != len) {
+        goto end;
+    }
+//    fprintf(stderr, "wow 4\n");
+    int tz_total_secs = tz_hour * 3600 + tz_minute * 60 + tz_second;
+    if (tz_sign == '-') {
+        tz_total_secs *= -1;
+    }
+    else if (tz_sign != '+') {
+        goto end;
+    }
+//    fprintf(stderr, "wow 5\n");
+    td = PyDelta_FromDSU(0, tz_total_secs, 0);
+    if (td == NULL) {
+        goto end;
+    }
+//    fprintf(stderr, "wow 6\n");
+    tz = PyTimeZone_FromOffset(td);
+    if (tz == NULL) {
+        goto end;
+    }
+//    fprintf(stderr, "wow 7\n");
+    dt = PyDateTimeAPI->DateTime_FromDateAndTime(
+        year, month, day, hour, minute, second, usec, tz,
+        PyDateTimeAPI->DateTimeType);
+
+end:
+    PyMem_Free(date_str);
+    Py_XDECREF(td);
+    Py_XDECREF(tz);
+    return dt;
+}
+
+
+PyObject *
+convert_pg_timestamptz_text(PPObject *self, char *buf, int len)
+{
+    PyObject *dt = convert_iso_timestamptz_txt(self, buf, len);
+    if (dt == NULL) {
+        if (PyErr_Occurred()) {
+            return NULL;
+        }
+        return PyUnicode_FromStringAndSize(buf, len);
+    }
+    return dt;
+}
+
+
+PyObject *astimezone;
+
+PyObject *
+convert_pg_timestamptz_bin(PPObject *self, char *buf, int len)
+{
+    int64_t value, tm;
+    int32_t pg_ordinal;
+    int year, month, day, hour, minute, second, usec;
+    char *bc_str, usec_str[8];
+
+    if (len != 8) {
+        PyErr_SetString(PyExc_ValueError, "Invalid binary timestamptz value.");
+        return NULL;
+    }
+    value = unpack_int8(buf);
+
+    // special values
+    if (value == INT64_MIN) {
+        return PyUnicode_FromString("-infinity");
+    }
+    if (value == INT64_MAX) {
+        return PyUnicode_FromString("infinity");
+    }
+
+    // split into date and time
+    pg_ordinal = (int32_t)(value / USECS_PER_DAY);
+    tm = value - pg_ordinal * USECS_PER_DAY;
+    if (tm < 0) {
+        tm += USECS_PER_DAY;
+        pg_ordinal -= 1;
+    }
+
+    // get date and time components
+    date_vals_from_int(pg_ordinal, &year, &month, &day);
+    if (time_vals_from_int(tm, &hour, &minute, &second, &usec) < 0)
+        return NULL;
+
+    if (year < 1) {
+        year = -1 * (year - 1);  /* There is no year zero */
+        bc_str = " BC";
+    }
+    else {
+        if (year < 10000) {
+            // timestamp is in Python range
+            PyObject *utc_ts, *loc_ts;
+
+            // Create datetime with UTC timezone
+            utc_ts = PyDateTimeAPI->DateTime_FromDateAndTime(
+                year, month, day, hour, minute, second, usec,
+                PyDateTime_TimeZone_UTC, PyDateTimeAPI->DateTimeType);
+            if (utc_ts == NULL) {
+                return NULL;
+            }
+            if (self->zone_info == NULL) {
+                // no known session timezone, return the value
+                return utc_ts;
+            }
+            // convert datetime to session timezone
+            loc_ts = PyObject_CallMethodObjArgs(
+                utc_ts, astimezone, self->zone_info, NULL);
+            Py_DECREF(utc_ts);
+            if (loc_ts) {
+                return loc_ts;
+            }
+            // Can happen when a timestamp close to the limits is converted to
+            // other timezone.
+            if (PyErr_ExceptionMatches(PyExc_OverflowError)) {
+                PyErr_Clear();
+            }
+            else {
+                return NULL;
+            }
+        }
+        bc_str = "";
+    }
+    // Timestamp is outside Python datetime range. Create string similar to
+    // postgres.
+
+    // strip trailing millisecond zeroes
+    while (usec && usec % 10 == 0) {
+        usec = usec / 10;
+    }
+    if (usec)
+        sprintf(usec_str, ".%i", usec);
+    else
+        usec_str[0] = '\0';
+    return PyUnicode_FromFormat(
+        "%04i-%02i-%02i %02i:%02i:%02i%s+00%s", year, month, day, hour, minute,
+        second, usec_str, bc_str);
+}
+
+
 PyObject *ZoneInfo;
 
 int
@@ -216,6 +423,10 @@ init_datetime(void) {
     ZoneInfo = PyObject_GetAttrString(zoneinfo_module, "ZoneInfo");
     Py_DECREF(zoneinfo_module);
     if (ZoneInfo == NULL) {
+        return -1;
+    }
+    astimezone = PyUnicode_InternFromString("astimezone");
+    if (astimezone == NULL) {
         return -1;
     }
     return 0;

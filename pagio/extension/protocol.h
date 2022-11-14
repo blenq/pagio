@@ -32,7 +32,7 @@ typedef struct _PPobject {
     PyObject *res_rows;                 // result set
     PyObject *res_fields;               // result set
     PyObject *result;                   // result set
-    res_converter *res_converters;      // result set
+    res_converter **res_converters;      // result set
 
 } PPObject;
 

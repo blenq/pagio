@@ -163,6 +163,10 @@ class CachedQueryExpired(ServerError):
     """ Error raised when a cached query is expired. """
 
 
+class StatementDoesNotExist(ServerError):
+    """ Error raised when a cached query is deallocated. """
+
+
 FieldInfo = namedtuple(
     "FieldInfo",
     ["field_name", "table_oid", "col_num", "type_oid", "type_size", "type_mod",
@@ -174,6 +178,16 @@ class Result(NamedTuple):
     fields: Optional[List[FieldInfo]]
     rows: Optional[List[Tuple[Any, ...]]]
     command_tag: str
+
+    @property
+    def records_affected(self) -> Optional[int]:
+        """ The number of affected records. """
+        parts = self.command_tag.rsplit(" ", 1)
+        if len(parts) == 2:
+            recs = parts[1]
+            if recs.isdigit():
+                return int(recs)
+        return None
 
 
 class ResultSet:
@@ -221,6 +235,11 @@ class ResultSet:
     def command_tag(self) -> str:
         """ The command tag as reported by the server. """
         return self._current().command_tag
+
+    @property
+    def records_affected(self) -> Optional[int]:
+        """ The number of affected records. """
+        return self._current().records_affected
 
     @property
     def fields(self) -> Optional[List[FieldInfo]]:

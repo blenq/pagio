@@ -10,7 +10,7 @@ typedef struct {
     int index;
     unsigned int num_executed;
     PyObject *res_fields;
-    res_converter *res_converters;
+    res_converter **res_converters;
 } PagioSTObject;
 
 extern PyTypeObject PagioST_Type;
@@ -45,12 +45,12 @@ static inline void PagioST_SET_RES_FIELDS(PyObject *st, PyObject* fields) {
     ((PagioSTObject *)st)->res_fields = fields;
 }
 
-static inline res_converter *PagioST_RES_CONVERTERS(PyObject *st) {
+static inline res_converter **PagioST_RES_CONVERTERS(PyObject *st) {
     return ((PagioSTObject *)st)->res_converters;
 }
 
 static inline void PagioST_SET_RES_CONVERTERS(
-        PyObject *st, res_converter *converters) {
+        PyObject *st, res_converter **converters) {
     ((PagioSTObject *)st)->res_converters = converters;
 }
 

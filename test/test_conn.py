@@ -3,7 +3,7 @@ import sys
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
-    sync_connection, sync_protocol, CachedQueryExpired
+    sync_connection, sync_protocol, CachedQueryExpired, StatementDoesNotExist
 )
 
 
@@ -207,6 +207,56 @@ class ConnCase(unittest.TestCase):
             self.assertEqual(16, res.rows[0][0])
             res = cn.execute("SELECT 16", result_format=Format.BINARY)
             self.assertEqual(16, res.rows[0][0])
+
+    def test_discard_all(self):
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("SELECT 1")
+            cn.execute("SELECT 1")
+            cn.execute("DISCARD ALL")
+            cn.execute("SELECT 1")
+            cn.execute("SELECT 1")
+            cn.execute("DEALLOCATE ALL")
+            res = cn.execute("SELECT 1")
+            self.assertEqual(1, res.rows[0][0])
+
+    def test_discard_one(self):
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("SELECT 1")
+            cn.execute("SELECT 1")
+
+            # statement is prepared now, deallocate to confuse cache
+            res = cn.execute(
+                "SELECT name FROM pg_prepared_statements "
+                "WHERE statement = 'SELECT 1';")
+            cn.execute("DEALLOCATE " + res.rows[0][0])
+
+            # should recover from error and successfully execute
+            res = cn.execute("SELECT 1")
+            self.assertEqual(1, res.rows[0][0])
+
+            # now do the same in a transaction
+            cn.execute("SELECT 1")
+            cn.execute("BEGIN")
+            res = cn.execute(
+                "SELECT name FROM pg_prepared_statements "
+                "WHERE statement = 'SELECT 1'")
+            cn.execute("DEALLOCATE  " + res.rows[0][0])
+            with self.assertRaises(StatementDoesNotExist):
+                # Pagio can't recover in a transaction
+                cn.execute("SELECT 1")
+
+    def test_cache_with_trans(self):
+        # See if statement caching works in combination with transactions.
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("BEGIN")
+            cn.execute("SELECT 1")
+            cn.execute("SELECT 1")
+            cn.execute("ROLLBACK")
+            res = cn.execute(
+                "SELECT COUNT(*) as num1 FROM pg_prepared_statements")
+            self.assertEqual(res.rows[0][0], 1)
+            res = cn.execute("SELECT 1")
+            self.assertEqual(1, res.rows[0][0])
 
 
 class PyConnCase(ConnCase):

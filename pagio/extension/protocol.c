@@ -257,84 +257,75 @@ PPhandle_parameter_status(PPObject *self, char **buf, char *end) {
 }
 
 
-static res_converter
-get_text_converter(unsigned int type_oid)
-{
-    switch(type_oid) {
-    case BOOLOID:
-        return convert_pg_bool_text;
-    case FLOAT4OID:
-    case FLOAT8OID:
-        return convert_pg_float_text;
-    case INT2OID:
-    case INT4OID:
-    case INT8OID:
-    case OIDOID:
-        return convert_pg_int_text;
-    case INETOID:
-        return convert_pg_inet_text;
-    case CIDROID:
-        return convert_pg_cidr_text;
-    case NUMERICOID:
-        return convert_pg_numeric_text;
-    case BYTEAOID:
-        return convert_pg_bytea_text;
-    case UUIDOID:
-        return convert_pg_uuid_text;
-    case DATEOID:
-        return convert_pg_date_text;
-    case TIMESTAMPOID:
-        return convert_pg_timestamp_text;
-    default:
-        return convert_pg_text;
-    }
-}
+static res_converter *
+get_converters(unsigned int type_oid) {
+    static res_converter
+        bool_converters[2] = {convert_pg_bool_text, convert_pg_bool_bin},
+        text_converters[2] = {convert_pg_text, convert_pg_text},
+        float4_converters[2] = {convert_pg_float_text, convert_pg_float4_bin},
+        float8_converters[2] = {convert_pg_float_text, convert_pg_float8_bin},
+        int2_converters[2] = {convert_pg_int_text, convert_pg_int2_bin},
+        int4_converters[2] = {convert_pg_int_text, convert_pg_int4_bin},
+        int8_converters[2] = {convert_pg_int_text, convert_pg_int8_bin},
+        uint4_converters[2] = {convert_pg_int_text, convert_pg_uint4_bin},
+        inet_converters[2] = {convert_pg_inet_text, convert_pg_inet_bin},
+        cidr_converters[2] = {convert_pg_cidr_text, convert_pg_cidr_bin},
+        numeric_converters[2] = {
+            convert_pg_numeric_text, convert_pg_numeric_bin},
+        bytea_converters[2] = {convert_pg_bytea_text, convert_pg_binary},
+        uuid_converters[2] = {convert_pg_uuid_text, convert_pg_uuid_bin},
+        date_converters[2] = {convert_pg_date_text, convert_pg_date_bin},
+        timestamp_converters[2] = {
+            convert_pg_timestamp_text, convert_pg_timestamp_bin},
+        timestamptz_converters[2] = {
+            convert_pg_timestamptz_text, convert_pg_timestamptz_bin},
+        default_converters[2] = {convert_pg_text, convert_pg_binary};
 
-
-static res_converter
-get_binary_converter(unsigned int type_oid)
-{
-    switch(type_oid) {
+    switch (type_oid) {
     case BOOLOID:
-        return convert_pg_bool_bin;
+        return bool_converters;
     case BPCHAROID:
     case CHAROID:
     case NAMEOID:
     case TEXTOID:
     case VARCHAROID:
-        return convert_pg_text;
+        return text_converters;
     case FLOAT4OID:
-        return convert_pg_float4_bin;
+        return float4_converters;
     case FLOAT8OID:
-        return convert_pg_float8_bin;
+        return float8_converters;
     case INT2OID:
-        return convert_pg_int2_bin;
+        return int2_converters;
     case INT4OID:
-        return convert_pg_int4_bin;
+        return int4_converters;
     case INT8OID:
-        return convert_pg_int8_bin;
+        return int8_converters;
     case OIDOID:
-        return convert_pg_uint4_bin;
+        return uint4_converters;
     case INETOID:
-        return convert_pg_inet_bin;
+        return inet_converters;
     case CIDROID:
-        return convert_pg_cidr_bin;
+        return cidr_converters;
     case NUMERICOID:
-        return convert_pg_numeric_bin;
+        return numeric_converters;
+    case BYTEAOID:
+        return bytea_converters;
     case UUIDOID:
-        return convert_pg_uuid_bin;
+        return uuid_converters;
     case DATEOID:
-        return convert_pg_date_bin;
+        return date_converters;
     case TIMESTAMPOID:
-        return convert_pg_timestamp_bin;
+        return timestamp_converters;
+    case TIMESTAMPTZOID:
+        return timestamptz_converters;
     default:
-        return convert_pg_binary;
+        return default_converters;
     }
 }
 
 
 static PyObject *
-read_field_info(char **buf, char *end, res_converter *converter)
+read_field_info(char **buf, char *end, res_converter **converters)
 {
     PyObject *field_info = NULL, *info_val;
     unsigned int type_oid;
@@ -394,22 +385,17 @@ read_field_info(char **buf, char *end, res_converter *converter)
     if (read_short(buf, end, &type_fmt) == -1) {
         goto error;
     }
+    if (type_fmt != 0 && type_fmt != 1) {
+        PyErr_SetString(PyExc_ValueError, "Invalid format value.");
+        goto error;
+    }
     info_val = PyLong_FromLong(type_fmt);
     if (info_val == NULL) {
         goto error;
     }
     PyStructSequence_SET_ITEM(field_info, 6, info_val);
 
-    if (type_fmt == 0) {
-        *converter = get_text_converter(type_oid);
-    }
-    else if (type_fmt == 1) {
-        *converter = get_binary_converter(type_oid);
-    }
-    else {
-        PyErr_SetString(PyExc_ValueError, "Invalid format value.");
-        goto error;
-    }
+    *converters = get_converters(type_oid);
     return field_info;
 error:
     Py_DECREF(field_info);
@@ -437,7 +423,7 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
         goto error;
     }
 
-    self->res_converters = PyMem_Calloc(num_cols, sizeof(res_converter));
+    self->res_converters = PyMem_Calloc(num_cols, sizeof(res_converter *));
     if (self->res_converters == NULL) {
         PyErr_NoMemory();
         goto error;
@@ -504,7 +490,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     unsigned short num_cols;
     int i, ret = -1;
     PyObject *row = NULL;
-    res_converter raw_converter = NULL;
+    res_converter *raw_converters = NULL;
 
     if (read_ushort(buf, end, &num_cols) == -1) {
         return -1;
@@ -518,12 +504,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
         return -1;
     }
     if (self->raw_result) {
-        if (self->result_format == 0) {
-            raw_converter = convert_pg_text;
-        }
-        else {
-            raw_converter = convert_pg_binary;
-        }
+        raw_converters = get_converters(0);
     }
     for (i = 0; i < num_cols; i++) {
         int val_len;
@@ -536,15 +517,20 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             Py_INCREF(Py_None);
             obj = Py_None;
         }
+        else if (val_len < 0) {
+            PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
+            goto end;
+        }
         else {
-            res_converter conv;
+            res_converter *conv;
             if (*buf + val_len > end) {
                 PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
-                return -1;
+                goto end;
             }
-            conv = raw_converter ? raw_converter : self->res_converters[i];
+            conv = raw_converters ? raw_converters : self->res_converters[i];
 
-            obj = conv(self, *buf, val_len);
+            obj = conv[(unsigned char)self->result_format](
+                self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
             }
@@ -612,6 +598,10 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
         }
         self->res_converters = NULL;
     }
+    if (end == *buf || *(end - 1) != '\0') {
+        PyErr_SetString(PyExc_ValueError, "Invalid command complete message.");
+        return -1;
+    }
 
     result_set = PyTuple_New(3);
     if (result_set == NULL) {
@@ -627,6 +617,13 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
     Py_INCREF(item);
     PyTuple_SET_ITEM(result_set, 1, item);
     Py_CLEAR(self->res_rows);
+
+    if (strcmp(*buf, "DISCARD ALL") == 0 ||
+            strcmp(*buf, "DEALLOCATE ALL") == 0) {
+        PyDict_Clear(self->stmt_cache);
+        Py_CLEAR(self->cache_item);
+        PyMem_Free(self->res_converters);
+    }
 
     tag = read_string(buf, end);
     if (tag == NULL) {

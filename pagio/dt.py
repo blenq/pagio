@@ -109,6 +109,7 @@ def txt_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
             pass
     return ts_str
 
+
 timestamptz_re = re.compile(
     r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?"
     r"([-+])(\d{2})(?::(\d{2})(?::(\d{2}))?)?$",
@@ -118,7 +119,8 @@ timestamptz_re = re.compile(
 def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
-    # String is in the form "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}][ BC]
+    # String is in the form
+    # "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}](-+)HH[:MM[:SS]][ BC]"
     # Python datetime range can only handle 4 digit year without 'BC' suffix
     ts_str = decode(buf)
     match = timestamptz_re.match(ts_str)
@@ -127,15 +129,15 @@ def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
         if usec is None:
             usec = 0
         else:
+            # compensate for missing trailing zeroes
             usec = int(usec + "0" * (6 - len(usec)))
 
-        tz_minutes = int(match.group(10) or 0)
-        tz_seconds = int(match.group(11) or 0)
-        tz_timedelta = timedelta(
-            hours=int(match.group(9)), minutes=tz_minutes, seconds=tz_seconds)
-        if match.group(8) == '-':
-            tz_timedelta *= -1
         try:
+            tz_timedelta = timedelta(
+                hours=int(match.group(9)), minutes=int(match.group(10) or 0),
+                seconds=int(match.group(11) or 0))
+            if match.group(8) == '-':
+                tz_timedelta *= -1
             return datetime(
                 *(int(g) for g in match.group(1, 2, 3, 4, 5, 6)), usec,
                 timezone(tz_timedelta))
@@ -182,8 +184,8 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
     year, month, day = _date_vals_from_int(pg_ordinal)
 
     if year < 1:
-        # display value of negative year including correction for non
-        # existing year 0
+        # display value of negative year including correction for non-existing
+        # year 0
         year = -1 * year + 1
         bc_suffix = " BC"
     else:
@@ -233,7 +235,7 @@ def bin_timestamptz_to_python(
         bc_suffix = ""
 
     # strip trailing millisecond zeroes
-    usec = str(usec).rstrip("0") if usec else ""
+    usec = f".{str(usec).rstrip('0')}" if usec else ""
 
-    return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}+00:00{7}".format(
+    return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}+00{7}".format(
         year, month, day, hour, minute, sec, usec, bc_suffix)

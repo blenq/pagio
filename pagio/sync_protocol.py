@@ -10,7 +10,8 @@ from .base_protocol import (
     _BasePGProtocol, PyBasePGProtocol, _STATUS_READY_FOR_QUERY,
     TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED,
     _STATUS_SSL_REQUESTED)
-from .common import ResultSet, CachedQueryExpired, Format
+from .common import (
+    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
 
 
 NO_RESULT = object()
@@ -142,7 +143,7 @@ class _PGProtocol(_BasePGProtocol):
         """ Execute a query text and return the result """
         try:
             return self._execute(sql, parameters, result_format, raw_result)
-        except CachedQueryExpired:
+        except (CachedQueryExpired, StatementDoesNotExist):
             if self.transaction_status == TransactionStatus.IDLE:
                 return self._execute(
                     sql, parameters, result_format, raw_result)

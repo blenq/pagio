@@ -17,7 +17,7 @@ from .pgscramp import PGScrampClient
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct_unpack_from, Format,
+    ushort_struct_unpack_from, Format, StatementDoesNotExist,
 )
 from . import const
 from .dt import (
@@ -323,6 +323,9 @@ class _BasePGProtocol(_AbstractPGProtocol):
         if ex_args[16] == "RevalidateCachedQuery":
             # recognize this particular error, to easily handle retry
             ex_class: Type[ServerError] = CachedQueryExpired
+        elif ex_args[1] == "26000":
+            # recognize this particular error, to easily handle retry
+            ex_class = StatementDoesNotExist
         else:
             ex_class = ServerError
         exc = ex_class(*ex_args)
@@ -785,7 +788,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         # Reset the statement
         self._stmt_to_close.update(
             prepared=False, num_executed=0, res_fields=None,
-            res_converters=[None, None])
+            txt_converters=None, bin_converters=None)
         self._stmt_to_close = None
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
@@ -873,8 +876,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         if self._result is None:
             raise ProtocolError("Unexpected close message.")
         command_tag = decode(msg_buf[:-1])
-        # if command_tag in ("DISCARD ALL", "DEALLOCATE ALL"):
-        #     self._cache.clear()
+        if command_tag in ("DISCARD ALL", "DEALLOCATE ALL"):
+            self._cache.clear()
         self._result.append((
             self.res_fields, self.res_rows, command_tag))
         self.res_fields = None
@@ -889,7 +892,9 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         cache_item = self._cache_item
         if cache_item is None:
             # Statement does not exist in cache
-            if self._ex is None and self._result and len(self._result) == 1:
+            if (self._ex is None and len(self._result) == 1 and
+                    self._result[0][2] not in (
+                        "DISCARD ALL", "DEALLOCATE ALL")):
                 # Successful execution, new item must be added to cache.
                 cache_len = len(self._cache)
                 if cache_len == self._cache_size:
@@ -922,8 +927,13 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             else:
                 # Error occurred
                 if cache_item["prepared"]:
-                    # Statement is server side prepared, mark for closure
-                    self._stmt_to_close = cache_item
+                    if self._ex.code == "26000":
+                        cache_item.update(
+                            prepared=False, num_executed=0, res_fields=None,
+                            bin_converters=None, txt_converters=None)
+                    else:
+                        # Statement is server side prepared, mark for closure
+                        self._stmt_to_close = cache_item
             self._cache_item = None
         self.cache_key = None
 

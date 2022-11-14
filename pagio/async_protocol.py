@@ -11,7 +11,8 @@ import scramp
 from .base_protocol import (
     _BasePGProtocol, PyBasePGProtocol, TransactionStatus, _STATUS_CONNECTED,
     _STATUS_CLOSED, _STATUS_READY_FOR_QUERY, _STATUS_SSL_REQUESTED)
-from .common import ResultSet, CachedQueryExpired, Format
+from .common import (
+    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
 
 
 # pylint: disable-next=too-many-instance-attributes
@@ -143,7 +144,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         try:
             return await self._execute(
                 sql, parameters, result_format, raw_result)
-        except CachedQueryExpired:
+        except (CachedQueryExpired, StatementDoesNotExist):
             # Cached statement is expired due to result types change.
             if self.transaction_status == TransactionStatus.IDLE:
                 # Not in a transaction, so retry is possible
