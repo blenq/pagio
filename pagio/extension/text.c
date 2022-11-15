@@ -1,18 +1,6 @@
 #include "text.h"
 
 
-PyObject *
-convert_pg_text(PPObject *self, char *buf, int len) {
-    return PyUnicode_FromStringAndSize(buf, len);
-}
-
-
-PyObject *
-convert_pg_binary(PPObject *self, char *buf, int len) {
-    return PyBytes_FromStringAndSize(buf, len);
-}
-
-
 static unsigned char digit_vals[256] = {
     37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37,
     37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37,

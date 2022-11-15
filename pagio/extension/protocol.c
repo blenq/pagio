@@ -492,13 +492,16 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     PyObject *row = NULL;
     res_converter *raw_converters = NULL;
 
+    // read number of values in row
     if (read_ushort(buf, end, &num_cols) == -1) {
         return -1;
     }
+    // should match number of fields earlier retrieved
     if (num_cols != PyList_GET_SIZE(self->res_fields)) {
         PyErr_SetString(PyExc_ValueError, "Invalid number of values.");
         return -1;
     }
+    // create our row
     row = PyTuple_New(num_cols);
     if (row == NULL) {
         return -1;
@@ -507,13 +510,16 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
         raw_converters = get_converters(0);
     }
     for (i = 0; i < num_cols; i++) {
+        // get values
         int val_len;
         PyObject *obj;
 
+        // read value length
         if (read_int(buf, end, &val_len) == -1) {
             goto end;
         }
         if (val_len == -1) {
+            // -1 means PostgreSQL NULL
             Py_INCREF(Py_None);
             obj = Py_None;
         }
@@ -522,22 +528,29 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             goto end;
         }
         else {
-            res_converter *conv;
+            res_converter *convs;
+
+            // value length must not point past message end
             if (*buf + val_len > end) {
                 PyErr_SetString(PyExc_ValueError, "Invalid datarow.");
                 goto end;
             }
-            conv = raw_converters ? raw_converters : self->res_converters[i];
 
-            obj = conv[(unsigned char)self->result_format](
+            // get the value
+            convs = raw_converters ? raw_converters : self->res_converters[i];
+            obj = convs[(unsigned char)self->result_format](
                 self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
             }
+
+            // position past value
             *buf += val_len;
         }
+        // fill our row with the value
         PyTuple_SET_ITEM(row, i, obj);
     }
+    // Add the row to the rows list
     ret = PyList_Append(self->res_rows, row);
 end:
     Py_DECREF(row);
@@ -622,7 +635,6 @@ PPhandle_command_complete(PPObject *self, char **buf, char *end) {
             strcmp(*buf, "DEALLOCATE ALL") == 0) {
         PyDict_Clear(self->stmt_cache);
         Py_CLEAR(self->cache_item);
-        PyMem_Free(self->res_converters);
     }
 
     tag = read_string(buf, end);
@@ -902,25 +914,34 @@ safe_add(int *orig, Py_ssize_t extra) {
 
 static int
 fill_param_info(
-    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+    ParamInfo *param_info, unsigned int *he_oid, unsigned short *he_fmt, PyObject *param)
 {
+    int ret;
+    unsigned int oid = 0;
+    short fmt = 0;
+
     if (param == Py_None) {
         param_info->len = -1;
-        return 0;
+        ret = 0;
     }
-    if (PyUnicode_Check(param)) {
-        return fill_unicode_info(param_info, oid, p_fmt, param);
+    else if (PyUnicode_Check(param)) {
+        ret = fill_unicode_info(param_info, &oid, &fmt, param);
     }
-    if (PyBool_Check(param)) {
-        return fill_bool_info(param_info, oid, p_fmt, param);
+    else if (PyBool_Check(param)) {
+        ret = fill_bool_info(param_info, &oid, &fmt, param);
     }
-    if (PyLong_Check(param)) {
-        return fill_long_info(param_info, oid, p_fmt, param);
+    else if (PyLong_Check(param)) {
+        ret = fill_long_info(param_info, &oid, &fmt, param);
     }
-    if (PyFloat_Check(param)) {
-        return fill_float_info(param_info, oid, p_fmt, param);
+    else if (PyFloat_Check(param)) {
+        ret = fill_float_info(param_info, &oid, &fmt, param);
     }
-    return fill_object_info(param_info, oid, p_fmt, param);
+    else {
+        ret = fill_object_info(param_info, &oid, &fmt, param);
+    }
+    *he_oid = htobe32(oid);
+    *he_fmt = htobe16((unsigned short) fmt);
+    return ret;
 }
 
 
@@ -1024,17 +1045,17 @@ fill_params(
     }
     for (i = 0; i < num_params; i++) {
         ParamInfo *p_info = *param_info + i;
-        unsigned int oid = 0;
-        short p_format = 0;
         if (fill_param_info(
-                p_info, &oid, &p_format, PyTuple_GET_ITEM(params, i)) == -1) {
+                p_info, *oids + i, *p_formats + i, PyTuple_GET_ITEM(params, i)
+                ) == -1) {
+            PyMem_Free(param_info);
+            PyMem_Free(oids);
+            PyMem_Free(p_formats);
             return -1;
         }
         if (p_info->len > 0) {
             *param_vals_len += p_info->len;
         }
-        (*oids)[i] = htobe32(oid);
-        (*p_formats)[i] = htobe16((unsigned short) p_format);
     }
     return 0;
 }

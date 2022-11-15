@@ -739,7 +739,6 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
 
         self._result = []
-        self._status = _STATUS_EXECUTING
         self._result_format = result_format
         self._raw_result = raw_result
 

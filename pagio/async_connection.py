@@ -80,7 +80,7 @@ class AsyncConnection(BaseConnection):
     async def cancel(self) -> None:
         """ Cancels an executing statement. """
 
-        if self.status != ProtocolStatus.EXECUTING:
+        if self.status is not ProtocolStatus.EXECUTING:
             # shortcut
             return
 
@@ -93,7 +93,7 @@ class AsyncConnection(BaseConnection):
 
         # If existing connection is still executing, send Cancel Request on the
         # new connection with backend key info of the current connection
-        if self.status == ProtocolStatus.EXECUTING:
+        if self.status is ProtocolStatus.EXECUTING:
             prot.cancel(self._protocol.backend_key)
         await prot.close()
 
@@ -105,6 +105,8 @@ class AsyncConnection(BaseConnection):
             raw_result: bool = False,
     ) -> ResultSet:
         """ Execute a query text and return the result """
+        # return await self._protocol.execute(
+        #     sql, parameters, result_format, raw_result)
         try:
             task = asyncio.create_task(self._protocol.execute(
                 sql, parameters, result_format, raw_result))

@@ -9,7 +9,7 @@ import scramp
 from .base_protocol import (
     _BasePGProtocol, PyBasePGProtocol, _STATUS_READY_FOR_QUERY,
     TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED,
-    _STATUS_SSL_REQUESTED)
+    _STATUS_SSL_REQUESTED, _STATUS_EXECUTING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
 
@@ -94,8 +94,7 @@ class _PGProtocol(_BasePGProtocol):
 
     def writelines(self, data: List[bytes]) -> None:
         """ Send multiple data chunks to the server """
-        for chunk in data:
-            self.write(chunk)
+        self.write(b''.join(data))
 
     def read(self) -> Any:
         """ Read data from server and handle returned data """
@@ -131,6 +130,7 @@ class _PGProtocol(_BasePGProtocol):
         self.writelines(
             self.execute_message(
                 sql, parameters, result_format, raw_result))
+        self._status = _STATUS_EXECUTING
         return ResultSet(self.read())
 
     def execute(

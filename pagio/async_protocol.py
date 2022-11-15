@@ -10,7 +10,8 @@ import scramp
 
 from .base_protocol import (
     _BasePGProtocol, PyBasePGProtocol, TransactionStatus, _STATUS_CONNECTED,
-    _STATUS_CLOSED, _STATUS_READY_FOR_QUERY, _STATUS_SSL_REQUESTED)
+    _STATUS_CLOSED, _STATUS_READY_FOR_QUERY, _STATUS_SSL_REQUESTED,
+    _STATUS_EXECUTING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
 
@@ -131,6 +132,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
             sql, parameters, result_format, raw_result)
         self._read_fut = self._loop.create_future()
         await self.writelines(msg)
+        self._status = _STATUS_EXECUTING
         return ResultSet(await self._read_fut)
 
     async def execute(
