@@ -3,7 +3,8 @@ import sys
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
-    sync_connection, sync_protocol, CachedQueryExpired, StatementDoesNotExist
+    sync_connection, sync_protocol, CachedQueryExpired, StatementDoesNotExist,
+    SSLMode,
 )
 
 
@@ -17,6 +18,13 @@ class ConnCase(unittest.TestCase):
     def test_ip_conn(self):
         cn = Connection(
             host='localhost', database='postgres', password='hoi\uE100')
+        self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
+        cn.close()
+
+    def test_ip_conn_no_ssl(self):
+        cn = Connection(
+            host='localhost', database='postgres', password='hoi\uE100',
+            ssl_mode=SSLMode.DISABLE)
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         cn.close()
 

@@ -3,7 +3,10 @@
 #ifndef _PAGIO_UTILS_H
 #define _PAGIO_UTILS_H
 
-uint16_t unpack_uint2(char *ptr);
+static inline uint16_t unpack_uint2(char *ptr) {
+    return (uint16_t)((((unsigned char)ptr[0]) << 8) | (unsigned char)ptr[1]);
+}
+
 static inline int16_t unpack_int2(char *ptr) {
     return (int16_t) unpack_uint2(ptr);
 }

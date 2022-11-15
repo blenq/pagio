@@ -105,11 +105,10 @@ class AsyncConnection(BaseConnection):
             raw_result: bool = False,
     ) -> ResultSet:
         """ Execute a query text and return the result """
-        # return await self._protocol.execute(
-        #     sql, parameters, result_format, raw_result)
         try:
             task = asyncio.create_task(self._protocol.execute(
                 sql, parameters, result_format, raw_result))
+            # shield the task, so we can wait for it again
             return await asyncio.shield(task)
         except asyncio.CancelledError as ex:
             # Task is cancelled, for example due to a timeout. Try to cancel
@@ -120,6 +119,7 @@ class AsyncConnection(BaseConnection):
                 await asyncio.wait_for(task, 2)
             finally:
                 raise ex
+
 
     async def close(self) -> None:
         """ Closes the connection """

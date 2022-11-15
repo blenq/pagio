@@ -1,14 +1,6 @@
 #include "utils.h"
 
 
-uint16_t unpack_uint2(char *ptr) {
-    uint16_t ret;
-
-    memcpy(&ret, ptr, 2);
-    return be16toh(ret);
-}
-
-
 uint32_t unpack_uint4(char *ptr)
 {
     int ret;

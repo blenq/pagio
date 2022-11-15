@@ -155,6 +155,10 @@ class _AbstractPGProtocol(ABC):
     def _setup_ssl_request(self) -> None:
         ...
 
+    @abstractmethod
+    def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
+        ...
+
 
 CANCEL_REQUEST_CODE = 80877102
 
@@ -186,7 +190,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
         self.password: Union[None, bytes] = None
         self.user: Union[None, bytes] = None
         self.scram_client: Optional[PGScrampClient] = None
-        self._channel_binding: Optional[Tuple[str, bytes]] = None
         self._ssl_in_use = False
 
     @property
@@ -368,7 +371,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 raise ProtocolError("Invalid SASL message.")
             mechanisms = decode(msg_buf[4:-2]).split("\0")
             self.scram_client = PGScrampClient(
-                mechanisms, self.password, self._channel_binding)
+                mechanisms, self.password, self.get_channel_binding())
 
             client_first = self.scram_client.get_client_first().encode()
             mechanism = self.scram_client.mechanism_name.encode()
@@ -398,7 +401,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
             # reset scram vars
             self.scram_client = None
-            self._channel_binding = None
         else:
             raise ProtocolError(
                 f"Unknown authentication specifier: {specifier}")

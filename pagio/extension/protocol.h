@@ -24,6 +24,7 @@ typedef struct _PPobject {
     unsigned int prepare_threshold;     // caching
     unsigned int cache_size;            // caching
     Py_hash_t cache_key_hash;           // caching
+    Py_hash_t prev_key_hash;           // caching
     PyObject *stmt_cache;               // caching
     PyObject *cache_key;                // caching
     PyObject *cache_item;               // caching

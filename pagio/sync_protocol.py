@@ -1,7 +1,7 @@
 """ Synchronous version of Protocol """
 
 import socket
-from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
+from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
 from typing import Optional, Union, Any, List, Tuple
 
 import scramp
@@ -51,8 +51,7 @@ class _PGProtocol(_BasePGProtocol):
         self._sock = ssl.wrap_socket(
             self._sock, server_hostname=server_hostname)
         self._sock.settimeout(None)
-        self._channel_binding = scramp.make_channel_binding(
-            "tls-server-end-point", self._sock)
+
         return True
 
     def request_ssl(self) -> bool:
@@ -62,6 +61,15 @@ class _PGProtocol(_BasePGProtocol):
         self._setup_ssl_request()
         self.write(b'\0\0\0\x08\x04\xd2\x16/')
         return bool(self.read())
+
+    def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
+        """ Returns the channel binding for SASL authentication """
+
+        if isinstance(self._sock, SSLSocket):
+            return scramp.make_channel_binding(
+                "tls-server-end-point", self._sock)
+        # No SSL in use so channel binding is not used either
+        return None
 
     def startup(  # pylint: disable=too-many-arguments
             self,

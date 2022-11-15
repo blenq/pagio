@@ -80,10 +80,6 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 self._transport, cast(BaseProtocol, self), ssl,
                 server_hostname=server_hostname,
                 ssl_handshake_timeout=ssl_handshake_timeout))
-            ssl_sock = self._transport.get_extra_info('ssl_object')
-            if ssl_sock is not None:
-                self._channel_binding = scramp.make_channel_binding(
-                    "tls-server-end-point", ssl_sock)
         self._ssl_in_use = ssl_ok
         return ssl_ok
 
@@ -96,6 +92,15 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._read_fut = self._loop.create_future()
         await self.write(b'\0\0\0\x08\x04\xd2\x16/')
         return cast(bool, await self._read_fut)
+
+    def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
+        """ Returns the channel binding for SASL authentication """
+
+        ssl_sock = self._transport.get_extra_info('ssl_object')
+        if ssl_sock is None:
+            # No SSL in use so channel binding is not used either
+            return None
+        return scramp.make_channel_binding("tls-server-end-point", ssl_sock)
 
     async def startup(  # pylint: disable=too-many-arguments
             self,

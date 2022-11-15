@@ -28,8 +28,8 @@ static inline void pack_int2(char *ptr, int16_t val) {
 
 int read_ushort(char **ptr, char *end, uint16_t *val) {
     if ((size_t) (end - *ptr) < sizeof(uint16_t)) {
-        *val = 0;
         PyErr_SetString(PyExc_ValueError, "Invalid size for ushort");
+        *val = 0;
         return -1;
     }
     *val = unpack_uint2(*ptr);
@@ -162,6 +162,7 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF(self);
     }
     self->status = _STATUS_CLOSED;
+    self->prev_key_hash = -1;
     return (PyObject *) self;
 }
 
@@ -660,73 +661,88 @@ static int
 ready_cache(PPObject *self) {
 
     if (self->cache_item) {
+        // existing cache item
         if (self->ex) {
             if (PagioST_PREPARED(self->cache_item)) {
+                // Exception occurred for server side prepared statement, mark
+                // for closure
                 self->stmt_to_close = self->cache_item;
                 Py_INCREF(self->stmt_to_close);
             }
         }
         else {
-            // move to most recent
-            if (_PyDict_DelItem_KnownHash(
-                    self->stmt_cache, self->cache_key, self->cache_key_hash) == -1) {
-                return -1;
-            }
-            if (_PyDict_SetItem_KnownHash(
-                    self->stmt_cache, self->cache_key, self->cache_item, self->cache_key_hash
-                    ) == -1) {
-                return -1;
+            // Successful execution
+            if (self->prev_key_hash != self->cache_key_hash) {
+                // move to most recent
+                if (_PyDict_DelItem_KnownHash(
+                        self->stmt_cache, self->cache_key, self->cache_key_hash) == -1) {
+                    return -1;
+                }
+                if (_PyDict_SetItem_KnownHash(
+                        self->stmt_cache, self->cache_key, self->cache_item, self->cache_key_hash
+                        ) == -1) {
+                    return -1;
+                }
+                self->prev_key_hash = self->cache_key_hash;
             }
             if (!PagioST_PREPARED(self->cache_item)) {
+                // increment execution counter
                 PagioST_INC_EXECUTED(self->cache_item);
             }
         }
     }
-    else {
-        if (self->ex == NULL && self->result &&
-                PyList_GET_SIZE(self->result) == 1) {
-            Py_ssize_t cache_size;
-            cache_size = PyDict_Size(self->stmt_cache);
-            int stmt_index;
-            PyObject *new_stmt;
+    else if (self->ex == NULL && self->result &&
+            PyList_GET_SIZE(self->result) == 1) {
+        // Successful statement not in cache, must be added to cache
 
-            if (cache_size == self->cache_size) {
-                Py_ssize_t ppos = 0;
-                PyObject *old_key, *old_cache_item;
+        Py_ssize_t cache_size;
+        cache_size = PyDict_GET_SIZE(self->stmt_cache);
+        int stmt_index;
+        PyObject *new_stmt;
 
-                // remove item from cache
-                PyDict_Next(self->stmt_cache, &ppos, &old_key, &old_cache_item);
-                Py_INCREF(old_key);
-                Py_INCREF(old_cache_item);
-                stmt_index = PagioST_INDEX(old_cache_item);
-                int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
-                Py_DECREF(old_key);
-                if (del_ret == -1) {
-                    Py_DECREF(old_cache_item);
-                    return -1;
-                }
-                if (PagioST_PREPARED(old_cache_item)) {
-                    self->stmt_to_close = old_cache_item;
-                }
-                else {
-                    Py_DECREF(old_cache_item);
-                }
+        if (cache_size == self->cache_size) {
+            // Cache is full, remove oldest one
+            Py_ssize_t ppos = 0;
+            PyObject *old_key, *old_cache_item;
+
+            // remove oldest item from cache
+            PyDict_Next(self->stmt_cache, &ppos, &old_key, &old_cache_item);
+            Py_INCREF(old_key);
+            Py_INCREF(old_cache_item);
+            int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
+            Py_DECREF(old_key);
+            if (del_ret == -1) {
+                Py_DECREF(old_cache_item);
+                return -1;
+            }
+            // Reuse statement index
+            stmt_index = PagioST_INDEX(old_cache_item);
+
+            if (PagioST_PREPARED(old_cache_item)) {
+                // Statement is prepared, mark for closure
+                self->stmt_to_close = old_cache_item;
             }
             else {
-                stmt_index = cache_size + 1;
+                Py_DECREF(old_cache_item);
             }
-            new_stmt = PagioST_new(stmt_index);
-            if (new_stmt == NULL) {
-                return -1;
-            }
-            int set_ret = _PyDict_SetItem_KnownHash(
-                self->stmt_cache, self->cache_key, new_stmt,
-                self->cache_key_hash);
+        }
+        else {
+            // generate statement index
+            stmt_index = cache_size + 1;
+        }
+        // create new statement and add to cache
+        new_stmt = PagioST_new(stmt_index);
+        if (new_stmt == NULL) {
+            return -1;
+        }
+        int set_ret = _PyDict_SetItem_KnownHash(
+            self->stmt_cache, self->cache_key, new_stmt,
+            self->cache_key_hash);
+        self->prev_key_hash = self->cache_key_hash;
 
-            Py_DECREF(new_stmt);
-            if (set_ret == -1) {
-                return -1;
-            }
+        Py_DECREF(new_stmt);
+        if (set_ret == -1) {
+            return -1;
         }
     }
     Py_CLEAR(self->cache_item);
@@ -749,10 +765,8 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
     *buf += 1;
     self->status = _STATUS_READY_FOR_QUERY;
 
-    if (self->prepare_threshold) {
-        if (ready_cache(self) == -1) {
-            return -1;
-        }
+    if (self->prepare_threshold && ready_cache(self) == -1) {
+        return -1;
     }
 
     if (self->ex) {
@@ -834,6 +848,8 @@ PPhandle_message(PPObject *self, char *buf) {
 
 static PyObject *
 PPbuffer_updated(PPObject *self, PyObject *arg) {
+    // Entrypoint for incoming data. One argument contains the number of
+    // received bytes.
 
     long nbytes;
     int msg_start = 0, new_msg_len;
@@ -852,11 +868,16 @@ PPbuffer_updated(PPObject *self, PyObject *arg) {
         return NULL;
     }
 
+    // A message consists of a header (one byte identifier and four byte
+    // message length), and a body (when message length > 0).
+    // Read header and body parts
     self->bytes_read += nbytes;
     while (self->bytes_read >= self->msg_len)
     {
+        // message part is available
         data = self->buf_ptr + msg_start;
         if (self->identifier == 0) {
+            // read header
             self->identifier = data[0];
             new_msg_len = unpack_int4(data + 1);
             if (new_msg_len < 4) {
@@ -865,6 +886,7 @@ PPbuffer_updated(PPObject *self, PyObject *arg) {
                     PyExc_ValueError, "Negative message length");
                 return NULL;
             }
+            // message length includes itself, subtract 4 to get body length
             new_msg_len -= 4;
             if (new_msg_len > STANDARD_BUF_SIZE) {
                 // create ad hoc buffer for large message
@@ -876,9 +898,12 @@ PPbuffer_updated(PPObject *self, PyObject *arg) {
             }
         }
         else {
+            // body received, handle the message
             if (PPhandle_message(self, data) == -1) {
                 return NULL;
             }
+
+            // setup to receive header again
             if (self->buf_ptr != self->standard_buf_ptr) {
                 // clean up ad hoc buffer
                 PyMem_Free(self->buf_ptr);
@@ -887,11 +912,15 @@ PPbuffer_updated(PPObject *self, PyObject *arg) {
             new_msg_len = 5;
             self->identifier = 0;
         }
+
+        // update buffer vars to read the next message part
         self->bytes_read -= self->msg_len;
         msg_start += self->msg_len;
         self->msg_len = new_msg_len;
     }
+
     if (self->bytes_read && msg_start) {
+        // Still trailing data left in buffer, move to start of buffer
         memmove(
             self->buf_ptr,
             self->standard_buf_ptr + msg_start,
@@ -1115,16 +1144,18 @@ lookup_cache(
         return -1;
     }
 
+    // get statement key
     self->cache_key = get_cache_key(sql, oids, num_params);
     if (self->cache_key == NULL) {
         return -1;
     }
-
     cache_key_hash = PyObject_Hash(self->cache_key);
     if (cache_key_hash == -1) {
         goto error;
     }
     self->cache_key_hash = cache_key_hash;
+
+    // lookup statement in cache
     self->cache_item = _PyDict_GetItem_KnownHash(
         self->stmt_cache, self->cache_key, cache_key_hash);
     if (self->cache_item == NULL) {
@@ -1197,7 +1228,7 @@ append_parse_message(
     const char *sql_bytes;
     char *buf, stmt_name[11] = {0};
     Py_ssize_t sql_len;
-    int parse_len, ret, stmt_name_len;
+    int parse_len, ret, stmt_name_len = 0;
     PyObject *parse_msg;
 
     if (stmt_index) {
@@ -1206,8 +1237,9 @@ append_parse_message(
                 PyExc_ValueError, "Error during string formatting.");
             return -1;
         }
+        stmt_name_len = 10;
     }
-    stmt_name_len = strlen(stmt_name);
+
     sql_bytes = PyUnicode_AsUTF8AndSize(sql, &sql_len);
     if (sql_bytes == NULL) {
         return -1;
@@ -1262,8 +1294,8 @@ append_bind_message(
     int result_format)
 {
     int bind_length, i;
-    char *portal_name = "", *buf, stmt_name[11] = {0};
-    size_t portal_name_len, stmt_name_len;
+    char *buf, stmt_name[11] = {0};
+    size_t stmt_name_len;
     PyObject *bind_msg;
 
     if (stmt_index) {
@@ -1276,7 +1308,7 @@ append_bind_message(
     // Bind:
     //      identifier 'B' (1)
     //      message length (4)
-    //      portal name (portal_name_len + 1)
+    //      portal name (1)
     //      stmt_name (stmt_name_len + 1)
     //      num_params (2)
     //      param formats (num_params * 2)
@@ -1288,12 +1320,8 @@ append_bind_message(
     //      result_format (2)
 
     // calculate length
-    portal_name_len = strlen(portal_name);
     stmt_name_len = strlen(stmt_name);
     bind_length = 14;
-    if (safe_add(&bind_length, portal_name_len) == -1) {
-        return -1;
-    }
     if (safe_add(&bind_length, stmt_name_len) == -1) {
         return -1;
     }
@@ -1312,7 +1340,7 @@ append_bind_message(
     // bind
     buf++[0] = 'B';
     write_int4(&buf, bind_length);
-    write_string(&buf, portal_name, portal_name_len + 1);
+    buf++[0] = 0;  // empty portal name
     write_string(&buf, stmt_name, stmt_name_len + 1);
     write_int2(&buf, (short)num_params);
     if (num_params) {
@@ -1511,7 +1539,11 @@ PPexecute_message(PPObject *self, PyObject *args)
 static PyObject *
 PPrequest_ssl(PPObject *self, PyObject *Py_UNUSED(un_used))
 {
-    self->identifier = 32;
+    // Set up for receiving response for ssl request. This response message
+    // does not have a header with identifier and msg length, but just one
+    // byte. Pretend the header is already received by setting these vars.
+
+    self->identifier = 32;  // pseudo identifier, never sent by PostgreSQL
     self->msg_len = 1;
 
     Py_RETURN_NONE;
