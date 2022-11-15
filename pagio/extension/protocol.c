@@ -491,7 +491,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     unsigned short num_cols;
     int i, ret = -1;
     PyObject *row = NULL;
-    res_converter *raw_converters = NULL;
+    res_converter *raw_converters;
 
     // read number of values in row
     if (read_ushort(buf, end, &num_cols) == -1) {
@@ -538,7 +538,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             }
 
             // get the value
-            convs = raw_converters ? raw_converters : self->res_converters[i];
+            convs = self->raw_result ? raw_converters : self->res_converters[i];
             obj = convs[(unsigned char)self->result_format](
                 self, *buf, val_len);
             if (obj == NULL) {
@@ -1050,36 +1050,21 @@ close_message(int stmt_index) {
 static int
 fill_params(
     PyObject *params,
-    ParamInfo **param_info,
-    unsigned int **oids,
-    unsigned short **p_formats,
+    ParamInfo *param_info,
+    unsigned int *oids,
+    unsigned short *p_formats,
     int *param_vals_len)
 {
     Py_ssize_t num_params, i;
 
     *param_vals_len = 0;
     num_params = PyTuple_GET_SIZE(params);
-    if (num_params == 0) {
-        *param_info = NULL;
-        *oids = NULL;
-        *p_formats = NULL;
-        return 0;
-    }
-    *param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
-    *oids = PyMem_Calloc(num_params, sizeof(unsigned int));
-    *p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
-    if (*param_info == NULL || *oids == NULL || *p_formats == NULL) {
-        PyErr_NoMemory();
-        return -1;
-    }
+
     for (i = 0; i < num_params; i++) {
-        ParamInfo *p_info = *param_info + i;
+        ParamInfo *p_info = param_info + i;
         if (fill_param_info(
-                p_info, *oids + i, *p_formats + i, PyTuple_GET_ITEM(params, i)
+                p_info, oids + i, p_formats + i, PyTuple_GET_ITEM(params, i)
                 ) == -1) {
-            PyMem_Free(param_info);
-            PyMem_Free(oids);
-            PyMem_Free(p_formats);
             return -1;
         }
         if (p_info->len > 0) {
@@ -1190,36 +1175,32 @@ error:
 }
 
 
-static int
-append_simple_query_message(PyObject *message, PyObject *sql)
+static PyObject *
+get_simple_query_message(PyObject *sql)
 {
     const char *sql_bytes;
     char *buf;
     Py_ssize_t sql_len;
     PyObject *query_msg;
-    int ret;
 
     sql_bytes = PyUnicode_AsUTF8AndSize(sql, &sql_len);
     if (sql_bytes == NULL) {
-        return -1;
+        return NULL;
     }
     query_msg = PyBytes_FromStringAndSize(NULL, sql_len + 6);
     if (query_msg == NULL) {
-        return -1;
+        return NULL;
     }
     buf = PyBytes_AS_STRING(query_msg);
     buf++[0] = 'Q';
     write_int4(&buf, sql_len + 5);
     write_string(&buf, sql_bytes, sql_len + 1);
-    ret = PyList_Append(message, query_msg);
-    Py_DECREF(query_msg);
-    return ret;
+    return query_msg;
 }
 
 
-static int
-append_parse_message(
-        PyObject *message,
+static PyObject *
+get_parse_message(
         int stmt_index,
         PyObject *sql,
         unsigned int *oids,
@@ -1228,21 +1209,21 @@ append_parse_message(
     const char *sql_bytes;
     char *buf, stmt_name[11] = {0};
     Py_ssize_t sql_len;
-    int parse_len, ret, stmt_name_len = 0;
+    int parse_len, stmt_name_len = 0;
     PyObject *parse_msg;
 
     if (stmt_index) {
         if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
             PyErr_SetString(
                 PyExc_ValueError, "Error during string formatting.");
-            return -1;
+            return NULL;
         }
         stmt_name_len = 10;
     }
 
     sql_bytes = PyUnicode_AsUTF8AndSize(sql, &sql_len);
     if (sql_bytes == NULL) {
-        return -1;
+        return NULL;
     }
 
     // Parse:
@@ -1254,18 +1235,18 @@ append_parse_message(
     //      param_oids (num_params * 4)
     parse_len = 8;
     if (safe_add(&parse_len, stmt_name_len) == -1) {
-        return -1;
+        return NULL;
     }
     if (safe_add(&parse_len, sql_len) == -1) {
-        return -1;
+        return NULL;
     }
     if (safe_add(&parse_len, num_params * 4) == -1) {
-        return -1;
+        return NULL;
     }
 
     parse_msg = PyBytes_FromStringAndSize(NULL, parse_len + 1);
     if (parse_msg == NULL) {
-        return -1;
+        return NULL;
     }
     buf = PyBytes_AS_STRING(parse_msg);
     buf++[0] = 'P';
@@ -1277,15 +1258,12 @@ append_parse_message(
         write_string(
             &buf, (const char *)oids, num_params * sizeof(unsigned int));
     }
-    ret = PyList_Append(message, parse_msg);
-    Py_DECREF(parse_msg);
-    return ret;
+    return parse_msg;
 }
 
 
-static int
-append_bind_message(
-    PyObject *message,
+static PyObject *
+get_bind_message(
     int stmt_index,
     ParamInfo *param_info,
     unsigned short *p_formats,
@@ -1302,7 +1280,7 @@ append_bind_message(
         if (sprintf(stmt_name, "_pagio_%03d", stmt_index) < 0) {
             PyErr_SetString(
                 PyExc_ValueError, "Error during string formatting.");
-            return -1;
+            return NULL;
         }
     }
     // Bind:
@@ -1323,17 +1301,17 @@ append_bind_message(
     stmt_name_len = strlen(stmt_name);
     bind_length = 14;
     if (safe_add(&bind_length, stmt_name_len) == -1) {
-        return -1;
+        return NULL;
     }
     if (safe_add(&bind_length, num_params * 6) == -1) {
-        return -1;
+        return NULL;
     }
     if (safe_add(&bind_length, param_vals_len) == -1) {
-        return -1;
+        return NULL;
     }
     bind_msg = PyBytes_FromStringAndSize(NULL, bind_length + 1);
     if (bind_msg == NULL) {
-        return -1;
+        return NULL;
     }
     buf = PyBytes_AS_STRING(bind_msg);
 
@@ -1357,126 +1335,120 @@ append_bind_message(
     }
     write_int2(&buf, 1);
     write_int2(&buf, result_format);
-
-    int ret = PyList_Append(message, bind_msg);
-    Py_DECREF(bind_msg);
-    return ret;
+    return bind_msg;
 }
 
 
-static int
-append_fixed_message(PyObject *message, const char *string, int len)
-{
-    PyObject *msg;
-    int ret;
 
-    msg = PyBytes_FromStringAndSize(string, len);
-    if (msg == NULL) {
-        return -1;
-    }
-    ret = PyList_Append(message, msg);
-    Py_DECREF(msg);
-    return ret;
-}
+static PyObject *desc_message;
+static PyObject *exec_sync_message;
 
 
-static inline int
-append_desc_message(PyObject *message)
-{
-    return append_fixed_message(message, "D\0\0\0\x06P\0", 7);
-}
-
-
-static inline int
-append_exec_sync_message(PyObject *message)
-{
-    return append_fixed_message(message, "E\0\0\0\t\0\0\0\0\0S\0\0\0\x04", 15);
-}
-
-
-static int
+static PyObject *
 _PPexecute_message(
     PPObject *self,
-    PyObject *message,
     PyObject *sql,
     PyObject *params,
     int result_format
     )
 {
-    ParamInfo *param_info;
-    unsigned int *oids;
-    unsigned short *p_formats;
+    ParamInfo *param_info = NULL;
+    unsigned int *oids = NULL;
+    unsigned short *p_formats = NULL;
     int prepared;
     int index;
-    int ret = -1;
     int param_vals_len = 0;
+    PyObject *msg_parts[5], *message = NULL, *msg_part;
+    int num_parts = 0;
+    Py_ssize_t num_params;
 
     if (self->stmt_to_close) {
         PyObject *close_msg;
-        int close_ret;
 
         close_msg = close_message(PagioST_INDEX(self->stmt_to_close));
         if (close_msg == NULL) {
-            return -1;
+            return NULL;
         }
-        close_ret = PyList_Append(message, close_msg);
-        Py_DECREF(close_msg);
-        if (close_ret == -1) {
-            return -1;
+        msg_parts[num_parts++] = close_msg;
+    }
+
+    num_params = PyTuple_GET_SIZE(params);
+    if (num_params) {
+        param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
+        oids = PyMem_Calloc(num_params, sizeof(unsigned int));
+        p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
+        if (param_info == NULL || oids == NULL || p_formats == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
+
+        if (fill_params(
+                params, param_info, oids, p_formats, &param_vals_len) == -1) {
+            goto error;
         }
     }
 
-    if (fill_params(
-            params, &param_info, &oids, &p_formats, &param_vals_len) == -1) {
-        goto end;
-    }
-    if (lookup_cache(
-            self, sql, oids, PyTuple_GET_SIZE(params), &prepared, &index) == -1) {
-        goto end;
+    if (lookup_cache(self, sql, oids, num_params, &prepared, &index) == -1) {
+        goto error;
     }
 
-    if (PyTuple_GET_SIZE(params) == 0 &&
-            (result_format == 0 || result_format == -1) && !prepared &&
-            !index) {
+    if (num_params == 0 && (result_format == 0 || result_format == -1) &&
+            !prepared && !index) {
         // Might be multiple statements, so use simple query
-        if (append_simple_query_message(message, sql) == -1) {
-            goto end;
+        msg_part = get_simple_query_message(sql);
+        if (msg_part == NULL) {
+            goto error;
         }
+        msg_parts[num_parts++] = msg_part;
         self->result_format = 0;
     } else {
         // use extended query
         if (!prepared) {
-            if (append_parse_message(
-                    message, index, sql, oids, PyTuple_GET_SIZE(params)) == -1) {
-                goto end;
+            // Parse message
+            msg_part = get_parse_message(index, sql, oids, num_params);
+            if (msg_part == NULL) {
+                goto error;
             }
+            msg_parts[num_parts++] = msg_part;
         }
+        PyMem_Free(oids);
+        oids = NULL;  // set to NULL for error handler
         if (result_format == -1) {
             // if default use binary for extended protocol
             result_format = 1;
         }
         self->result_format = result_format;
-        if (append_bind_message(
-                message, index, param_info, p_formats,
-                PyTuple_GET_SIZE(params), param_vals_len, result_format
-                ) == -1) {
-            goto end;
+
+        // Bind message
+        msg_part = get_bind_message(
+            index, param_info, p_formats, num_params, param_vals_len,
+            result_format);
+        PyMem_Free(p_formats);
+        p_formats = NULL;  // set to NULL for error handler
+        if (msg_part == NULL) {
+            goto error;
         }
+        msg_parts[num_parts++] = msg_part;
+
         clean_param_info(param_info, PyTuple_GET_SIZE(params));
+        param_info = NULL;  // set to NULL for error handler
 
         if (!prepared) {
-            if (append_desc_message(message) == -1) {
-                goto end;
-            }
+            // Describe message
+            Py_INCREF(desc_message);
+            msg_parts[num_parts++] = desc_message;
         }
-        if (append_exec_sync_message(message) == -1) {
-            goto end;
-        }
+        Py_INCREF(exec_sync_message);  // Execute and Sync message
+        msg_parts[num_parts++] = exec_sync_message;
     }
     Py_CLEAR(self->result);
     self->result = PyList_New(0);
     if (self->result == NULL) {
-        goto end;
+        goto error;
+    }
+    message = PyTuple_New(num_parts);
+    if (message == NULL) {
+        goto error;
     }
 
     if (prepared) {
@@ -1484,8 +1456,7 @@ _PPexecute_message(
         if (PagioST_RES_FIELDS(self->cache_item)) {
             res_rows = PyList_New(0);
             if (res_rows == NULL) {
-                Py_CLEAR(message);
-                goto end;
+                goto error;
             }
         }
         self->res_rows = res_rows;
@@ -1494,19 +1465,29 @@ _PPexecute_message(
         self->res_converters = PagioST_RES_CONVERTERS(self->cache_item);
         Py_XINCREF(self->res_fields);
     }
+    for (int i = 0; i < num_parts; i++) {
+        PyTuple_SET_ITEM(message, i, msg_parts[i]);
+    }
     self->status = _STATUS_EXECUTING;
-    ret = 0;
-end:
+    return message;
+error:
+    for (int i = 0; i < num_parts; i++) {
+        Py_DECREF(msg_parts[i]);
+    }
+    Py_DECREF(message);
     PyMem_Free(oids);
     PyMem_Free(p_formats);
-    return ret;
+    if (param_info) {
+        clean_param_info(param_info, PyTuple_GET_SIZE(params));
+    }
+    return NULL;
 }
 
 
 static PyObject *
 PPexecute_message(PPObject *self, PyObject *args)
 {
-    PyObject *sql, *params, *message;
+    PyObject *sql, *params;
     int result_format = 0, raw_result;
 
     if (!PyArg_ParseTuple(
@@ -1522,17 +1503,8 @@ PPexecute_message(PPObject *self, PyObject *args)
         PyErr_SetString(PyExc_ValueError, "Invalid result format.");
         return NULL;
     }
-    message = PyList_New(0);
-    if (message == NULL) {
-        return NULL;
-    }
-    if (_PPexecute_message(
-            self, message, sql, params, result_format) == -1) {
-        Py_CLEAR(message);
-    }
     self->raw_result = raw_result;
-
-    return message;
+    return _PPexecute_message(self, sql, params, result_format);
 }
 
 
@@ -1663,6 +1635,9 @@ PyInit__pagio(void)
     }
 
     set_result = PyUnicode_InternFromString("_set_result");
+    desc_message = PyBytes_FromStringAndSize("D\0\0\0\x06P\0", 7);
+    exec_sync_message = PyBytes_FromStringAndSize(
+        "E\0\0\0\t\0\0\0\0\0S\0\0\0\x04", 15);
 
     return m;
 }

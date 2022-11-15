@@ -91,7 +91,7 @@ and when it uses binary the value will be converted to an ISO string.
   +--------+---------------+--------------+---------+-------------------------------------+
   | binary |               |      yes     |   yes   | datetime with (ZoneInfo) timezone   |
   +--------+---------------+--------------+---------+-------------------------------------+
-  | binary |               |      yes     |    no   | datetime with utc timezone          |
+  | binary |               |      yes     |    no   | datetime with UTC timezone          |
   +--------+---------------+--------------+---------+-------------------------------------+
   | binary |               |       no     |         | pagio generated iso format text     |
   +--------+---------------+--------------+---------+-------------------------------------+
