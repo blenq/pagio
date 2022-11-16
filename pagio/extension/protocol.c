@@ -199,12 +199,12 @@ PPget_buffer(PPObject *self, PyObject *arg)
     if (self->bytes_read || self->buf_ptr != self->standard_buf_ptr) {
         return PyMemoryView_FromMemory(
             self->buf_ptr + self->bytes_read,
-            get_buf_size(self) - self->bytes_read,
-            PyBUF_WRITE);
+            get_buf_size(self) - self->bytes_read, PyBUF_WRITE);
     }
     Py_INCREF(self->buf);
     return self->buf;
 }
+
 
 static int
 PPhandle_parameter_status(PPObject *self, char **buf, char *end) {
@@ -419,7 +419,7 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
         return -1;
     }
 
-    res_fields = PyList_New(num_cols);
+    res_fields = PyTuple_New(num_cols);
     if (res_fields == NULL) {
         goto error;
     }
@@ -436,7 +436,7 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
         if (field_info == NULL) {
             goto error;
         }
-        PyList_SET_ITEM(res_fields, i, field_info);
+        PyTuple_SET_ITEM(res_fields, i, field_info);
     }
 
     if (*buf != end) {
@@ -498,7 +498,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
         return -1;
     }
     // should match number of fields earlier retrieved
-    if (num_cols != PyList_GET_SIZE(self->res_fields)) {
+    if (num_cols != PyTuple_GET_SIZE(self->res_fields)) {
         PyErr_SetString(PyExc_ValueError, "Invalid number of values.");
         return -1;
     }
@@ -1076,30 +1076,21 @@ fill_params(
 
 
 static PyObject *
-get_cache_key(PyObject *sql, unsigned int *oids, Py_ssize_t num_params) {
-    if (num_params == 0) {
+get_cache_key(PyObject *sql, PyObject *oid_bytes) {
+    if (oid_bytes == NULL) {
         // No parameters, just use the sql statement
         Py_INCREF(sql);
         return sql;
     }
-    // Create tuple of sql statement and bytes object filled with oids
-    PyObject *cache_key, *oid_bytes;
-    Py_ssize_t oids_size;
 
-    cache_key = PyTuple_New(2);
+    // Create tuple of sql statement and bytes object filled with oids
+    PyObject *cache_key = PyTuple_New(2);
     if (cache_key == NULL) {
         return NULL;
     }
 
-    oids_size = num_params * sizeof(unsigned int);
-    oid_bytes = PyBytes_FromStringAndSize(NULL, oids_size);
-    if (oid_bytes == NULL) {
-        Py_DECREF(cache_key);
-        return NULL;
-    }
-    memcpy(PyBytes_AS_STRING(oid_bytes), oids, oids_size);
-
     Py_INCREF(sql);
+    Py_INCREF(oid_bytes);
     PyTuple_SET_ITEM(cache_key, 0, sql);
     PyTuple_SET_ITEM(cache_key, 1, oid_bytes);
     return cache_key;
@@ -1110,12 +1101,10 @@ static int
 lookup_cache(
     PPObject *self,
     PyObject *sql,
-    unsigned int *oids,
-    Py_ssize_t num_params,
+    PyObject *oid_bytes,
     int *prepared,
     int *index)
 {
-    Py_hash_t cache_key_hash;
     *index = 0;
     *prepared = 0;
 
@@ -1130,19 +1119,18 @@ lookup_cache(
     }
 
     // get statement key
-    self->cache_key = get_cache_key(sql, oids, num_params);
+    self->cache_key = get_cache_key(sql, oid_bytes);
     if (self->cache_key == NULL) {
         return -1;
     }
-    cache_key_hash = PyObject_Hash(self->cache_key);
-    if (cache_key_hash == -1) {
+    self->cache_key_hash = PyObject_Hash(self->cache_key);
+    if (self->cache_key_hash == -1) {
         goto error;
     }
-    self->cache_key_hash = cache_key_hash;
 
     // lookup statement in cache
     self->cache_item = _PyDict_GetItem_KnownHash(
-        self->stmt_cache, self->cache_key, cache_key_hash);
+        self->stmt_cache, self->cache_key, self->cache_key_hash);
     if (self->cache_item == NULL) {
         if (PyErr_Occurred()) {
             goto error;
@@ -1353,34 +1341,37 @@ _PPexecute_message(
     )
 {
     ParamInfo *param_info = NULL;
-    unsigned int *oids = NULL;
+    PyObject *msg_parts[5], *message = NULL, *msg_part, *oid_bytes = NULL;
+    Py_ssize_t num_params;
+    unsigned int *oids;
     unsigned short *p_formats = NULL;
     int prepared;
     int index;
     int param_vals_len = 0;
-    PyObject *msg_parts[5], *message = NULL, *msg_part;
     int num_parts = 0;
-    Py_ssize_t num_params;
 
     if (self->stmt_to_close) {
-        PyObject *close_msg;
-
-        close_msg = close_message(PagioST_INDEX(self->stmt_to_close));
-        if (close_msg == NULL) {
+        msg_part = close_message(PagioST_INDEX(self->stmt_to_close));
+        if (msg_part == NULL) {
             return NULL;
         }
-        msg_parts[num_parts++] = close_msg;
+        msg_parts[num_parts++] = msg_part;
     }
 
     num_params = PyTuple_GET_SIZE(params);
     if (num_params) {
         param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
-        oids = PyMem_Calloc(num_params, sizeof(unsigned int));
         p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
-        if (param_info == NULL || oids == NULL || p_formats == NULL) {
+        if (param_info == NULL || p_formats == NULL) {
             PyErr_NoMemory();
             goto error;
         }
+        oid_bytes = PyBytes_FromStringAndSize(
+            NULL, num_params * sizeof(unsigned int));
+        if (oid_bytes == NULL) {
+            goto error;
+        }
+        oids = (unsigned int *)PyBytes_AS_STRING(oid_bytes);
 
         if (fill_params(
                 params, param_info, oids, p_formats, &param_vals_len) == -1) {
@@ -1388,7 +1379,7 @@ _PPexecute_message(
         }
     }
 
-    if (lookup_cache(self, sql, oids, num_params, &prepared, &index) == -1) {
+    if (lookup_cache(self, sql, oid_bytes, &prepared, &index) == -1) {
         goto error;
     }
 
@@ -1411,8 +1402,8 @@ _PPexecute_message(
             }
             msg_parts[num_parts++] = msg_part;
         }
-        PyMem_Free(oids);
-        oids = NULL;  // set to NULL for error handler
+        Py_CLEAR(oid_bytes); // set to NULL for error handler
+
         if (result_format == -1) {
             // if default use binary for extended protocol
             result_format = 1;
@@ -1475,7 +1466,7 @@ error:
         Py_DECREF(msg_parts[i]);
     }
     Py_DECREF(message);
-    PyMem_Free(oids);
+    Py_DECREF(oid_bytes);
     PyMem_Free(p_formats);
     if (param_info) {
         clean_param_info(param_info, PyTuple_GET_SIZE(params));
