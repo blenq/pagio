@@ -152,9 +152,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
             return await self._execute(
                 sql, parameters, result_format, raw_result)
         except (CachedQueryExpired, StatementDoesNotExist):
-            # Cached statement is expired due to result types change.
+            # Cached statement result types are changed or is deallocated
             if self.transaction_status == TransactionStatus.IDLE:
-                # Not in a transaction, so retry is possible
+                # Not in a transaction, so retry is possible.
                 return await self._execute(
                     sql, parameters, result_format, raw_result)
             raise

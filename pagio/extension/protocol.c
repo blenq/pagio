@@ -1384,7 +1384,7 @@ _PPexecute_message(
     }
 
     if (num_params == 0 && (result_format == 0 || result_format == -1) &&
-            !prepared && !index) {
+            !self->cache_item) {
         // Might be multiple statements, so use simple query
         msg_part = get_simple_query_message(sql);
         if (msg_part == NULL) {

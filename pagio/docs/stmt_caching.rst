@@ -22,27 +22,29 @@ Except for the creation method, these prepared statements are the same.
 A view exists to inspect all prepared statements for the current session.
 https://www.postgresql.org/docs/current/view-pg-prepared-statements.html
 
-The pagio library also implements protocol level statement caching. Not
+The pagio library also implements protocol level statement preparation. Not
 explicitly, like libpq, but transparently when a threshold is reached for the
-number of executions of a particular statement.
+number of executions of a particular statement. The prepared statement is
+used on subsequent requests.
 This speeds up the process for two reasons:
 
-- There is less protocol traffic necessary for the client. It doesn't request
-  nor receive metadata (like number of columns, and data types).
+- There is less protocol traffic and interpretation necessary for the client.
+  It doesn't request nor receive metadata (like number of columns, and data
+  types).
 - PostgreSQL does not need to parse the statement.
 
 This happens all transparently from the caller's perspective, but a bit of
 insight in the inner workings might be useful.
 
 A pagio connection maintains a cache of statements, with a default size of 100.
-When a statement is executed succesfully it is inserted or moved up to the most
-recently used spot in the cache.
+When a statement is executed successfully it is inserted or moved up to the
+most recently used spot in the cache.
 If a statement is executed successfully the number of
-times the prepare_threshold is set to, then it will prepared with a name next
-time around. So setting the prepare_threshold to 1 will have created a server
-side prepared statement when it is executed successfully twice. Using a name,
-causes PostgreSQL to keep a reference to it, until the statement is explicitly
-closed by the client.
+times the prepare_threshold is set to, then it will be prepared with a name
+next time around. So setting the prepare_threshold to 1 will have created a
+server side prepared statement when it is executed successfully twice. Using a
+name, causes PostgreSQL to keep a reference to it, until the statement is
+explicitly closed by the client.
 
 The statements are identified by the combination of the SQL statement and the
 input parameter database types. A statement text like "SELECT $1" with an
@@ -52,11 +54,12 @@ float parameter value.
 When the cache is full, the least recent item is removed from the cache. If
 that statement is prepared on the server it is marked for closure by the
 pagio library. The actual
-close command will be sent to the server, when a following query statement is
+Close command will be sent to the server, when a following query statement is
 executed, to prevent multiple roundtrips.
 
-When a server side statement causes an error, it will be marked for closure as
-well.
+If PostgreSQL returns an error when executing a prepared statement, then the
+statement will be marked for closure as well.
+
 
 Things to keep in mind
 ----------------------
@@ -66,13 +69,14 @@ command texts with multiple statements. Such command texts will be executed
 with the Simple Query protocol and never be prepared or cached.
 
 When a statement is executed for the first time, without parameters and with
-the result format not set or set to TEXT, pagio will use the Simple
+the result format not set, pagio will use the Simple
 Query protocol. This is necessary to accommodate for a possible multi-statement
 command text. The Simple Query protocol supports only TEXT result format.
 When a single statement is executed multiple times and prepared server side, it
-will start using the Extended Query protocol with the result format set to
-BINARY if no result format is set by the caller, for performance reasons. This
-is not a problem if for both formats a converter is in place.
+will start using the Extended Query protocol. The Extended Query protocol
+will set the result format to BINARY by default if not explicitly set otherwise
+by the caller, for performance reasons.
+This is not a problem if for both formats a converter is in place.
 If you are writing a custom converter, whenever that is actually possible, you
 must implement therefore both a text converter and a binary converter.
 
