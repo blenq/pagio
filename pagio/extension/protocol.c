@@ -1392,6 +1392,7 @@ _PPexecute_message(
         }
         msg_parts[num_parts++] = msg_part;
         self->result_format = 0;
+        self->extended_query = 0;
     } else {
         // use extended query
         if (!prepared) {
@@ -1431,6 +1432,7 @@ _PPexecute_message(
         }
         Py_INCREF(exec_sync_message);  // Execute and Sync message
         msg_parts[num_parts++] = exec_sync_message;
+        self->extended_query = 1;
     }
     Py_CLEAR(self->result);
     self->result = PyList_New(0);
@@ -1478,12 +1480,13 @@ error:
 static PyObject *
 PPexecute_message(PPObject *self, PyObject *args)
 {
-    PyObject *sql, *params;
+    PyObject *sql, *params, *file_obj;
     int result_format = 0, raw_result;
 
     if (!PyArg_ParseTuple(
-            args, "O!O!ip:execute_message", &PyUnicode_Type,
-            &sql, &PyTuple_Type, &params, &result_format, &raw_result)) {
+            args, "O!O!ipO:execute_message", &PyUnicode_Type,
+            &sql, &PyTuple_Type, &params, &result_format, &raw_result,
+            &file_obj)) {
         return NULL;
     }
     if (PyTuple_GET_SIZE(params) > INT16_MAX) {
@@ -1495,6 +1498,9 @@ PPexecute_message(PPObject *self, PyObject *args)
         return NULL;
     }
     self->raw_result = raw_result;
+    Py_XDECREF(self->file_obj);
+    Py_INCREF(file_obj);
+    self->file_obj = file_obj;
     return _PPexecute_message(self, sql, params, result_format);
 }
 
@@ -1545,6 +1551,12 @@ static PyMemberDef PP_members[] = {
     },
     {"_tz_info", T_OBJECT, offsetof(PPObject, zone_info), READONLY,
      "timezone info"
+    },
+    {"file_obj", T_OBJECT_EX, offsetof(PPObject, file_obj), READONLY,
+     "file object"
+    },
+    {"_extended_query", T_BOOL, offsetof(PPObject, extended_query), READONLY,
+     "Extended Query flag"
     },
     {NULL}  /* Sentinel */
 };

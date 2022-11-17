@@ -75,7 +75,7 @@ def bin_date_to_python(buf: memoryview) -> Union[str, date]:
 
 
 if sys.version_info < (3, 11):
-    def _from_isoformat(ts_str: str):
+    def _from_isoformat(ts_str: str) -> datetime:
         if len(ts_str) not in (19, 23, 26):
             # Python only accepts zero, three or six microsecond digits
             ts_str += '0' * (26 - len(ts_str))
@@ -104,7 +104,7 @@ def txt_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
             usec = int(usec + "0" * (6 - len(usec)))
         try:
             return datetime(
-                *(int(g) for g in match.group(1, 2, 3, 4, 5, 6)), usec)
+                *(int(g) for g in match.groups()[:6]), usec)  # type:ignore
         except ValueError:
             pass
     return ts_str
@@ -139,8 +139,8 @@ def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
             if match.group(8) == '-':
                 tz_timedelta *= -1
             return datetime(
-                *(int(g) for g in match.group(1, 2, 3, 4, 5, 6)), usec,
-                timezone(tz_timedelta))
+                *(int(g) for g in match.groups()[:6]), usec,  # type: ignore
+                tzinfo=timezone(tz_timedelta))
         except ValueError:
             pass
     return ts_str
@@ -152,7 +152,7 @@ USECS_PER_HOUR = 60 * USECS_PER_MINUTE
 USECS_PER_DAY = 24 * USECS_PER_HOUR
 
 
-def _time_vals_from_int(tm):
+def _time_vals_from_int(tm: int) -> Tuple[int, int, int, int]:
     hour, tm = divmod(tm, USECS_PER_HOUR)
     if tm < 0 or hour > 24:
         raise ProtocolError("Invalid time value")
@@ -192,10 +192,10 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
         bc_suffix = ""
 
     # strip trailing millisecond zeroes
-    usec = str(usec).rstrip("0") if usec else ""
+    usec_str = str(usec).rstrip("0") if usec else ""
 
     return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}{7}".format(
-        year, month, day, hour, minute, sec, usec, bc_suffix)
+        year, month, day, hour, minute, sec, usec_str, bc_suffix)
 
 
 def bin_timestamptz_to_python(
@@ -235,7 +235,7 @@ def bin_timestamptz_to_python(
         bc_suffix = ""
 
     # strip trailing millisecond zeroes
-    usec = f".{str(usec).rstrip('0')}" if usec else ""
+    usec_str = f".{str(usec).rstrip('0')}" if usec else ""
 
     return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}+00{7}".format(
-        year, month, day, hour, minute, sec, usec, bc_suffix)
+        year, month, day, hour, minute, sec, usec_str, bc_suffix)

@@ -6,11 +6,18 @@ from collections import OrderedDict
 from datetime import date, datetime
 import enum
 from hashlib import md5
+from io import IOBase
 from itertools import repeat
 from struct import Struct, unpack_from, pack
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
-    Type, OrderedDict as TypingOrderedDict, Iterable, TypedDict)
+    Type, OrderedDict as TypingOrderedDict, Iterable)
+
+try:
+    from typing import TypedDict
+except ImportError:
+    from typing_extensions import TypedDict
+
 
 from .pgscramp import PGScrampClient
 
@@ -144,6 +151,7 @@ class _AbstractPGProtocol(ABC):
         parameters: Tuple[Any, ...],
         result_format: Format,
         raw_result: bool,
+        file_obj: IOBase,
     ) -> List[bytes]:
         """ Executes a statement. """
 
@@ -426,7 +434,7 @@ CacheKey = Union[str, Tuple[str, Tuple[int]]]
 class Statement(TypedDict):
     prepared: bool
     num_executed: int
-    res_fields: Optional[FieldInfo]
+    res_fields: Optional[Tuple[FieldInfo, ...]]
     bin_converters: Optional[List[ResConverter]]
     txt_converters: Optional[List[ResConverter]]
     name: bytes
@@ -443,7 +451,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         # cache stuff
         self._cache: TypingOrderedDict[
             CacheKey, Statement] = OrderedDict()
-        self._cache_item: Optional[Dict[str, Any]] = None
+        self._cache_item: Optional[Statement] = None
         self._prepare_threshold = 5
         self._cache_size = 100
         self.cache_key: Optional[CacheKey] = None
@@ -458,10 +466,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         # resultset vars
         self.res_rows: Optional[List[Tuple[Any, ...]]] = None
-        self.res_fields: Optional[List[FieldInfo]] = None
+        self.res_fields: Optional[Tuple[FieldInfo, ...]] = None
         self.res_converters: Optional[List[ResConverter]] = None
         self._result_format = Format.DEFAULT
         self._raw_result = False
+        self._extended_query = False
 
         # return values
         self._result: Optional[List[Tuple[
@@ -696,6 +705,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
+            file_obj: IOBase,
     ) -> List[bytes]:
         """ Executes a statement. """
 
@@ -722,6 +732,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 and not stmt_name):
             # Use simple query
             message.append(self._simple_query_msg(sql))
+            self._extended_query = False
         else:
             if not prepared:
                 # Parse
@@ -739,10 +750,12 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             # Execute and Sync
             message.append(
                 b'E\x00\x00\x00\t\x00\x00\x00\x00\x00S\x00\x00\x00\x04')
+            self._extended_query = True
 
         self._result = []
         self._result_format = result_format
         self._raw_result = raw_result
+        self.file_obj = file_obj
 
         return message
 
@@ -822,7 +835,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             offset += field_desc_struct_size
         if offset != len(msg_buf):
             raise ProtocolError("Additional data after row description")
-        self.res_fields = res_fields
+        self.res_fields = (*res_fields,)
         self.res_rows = []
         self.res_converters = converters
         if self._cache_item is not None and self._cache_item["prepared"]:

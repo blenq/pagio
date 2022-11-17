@@ -17,6 +17,7 @@ typedef struct _PPobject {
     char iso_dates;                     // protocol
     char result_format;                 // protocol
     char raw_result;                    // protocol
+    char extended_query;                // protocol
     PyObject *ex;                       // protocol
     PyObject *server_parameters;        // protocol
     PyObject *zone_info;                // protocol
@@ -24,7 +25,7 @@ typedef struct _PPobject {
     unsigned int prepare_threshold;     // caching
     unsigned int cache_size;            // caching
     Py_hash_t cache_key_hash;           // caching
-    Py_hash_t prev_key_hash;           // caching
+    Py_hash_t prev_key_hash;            // caching
     PyObject *stmt_cache;               // caching
     PyObject *cache_key;                // caching
     PyObject *cache_item;               // caching
@@ -33,7 +34,8 @@ typedef struct _PPobject {
     PyObject *res_rows;                 // result set
     PyObject *res_fields;               // result set
     PyObject *result;                   // result set
-    res_converter **res_converters;      // result set
+    PyObject *file_obj;                 // result set
+    res_converter **res_converters;     // result set
 
 } PPObject;
 

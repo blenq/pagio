@@ -5,6 +5,11 @@ import enum
 from struct import Struct
 from typing import Tuple, Any, Optional, Union, List, Iterator, NamedTuple
 
+try:
+    from typing import Protocol
+except ImportError:
+    from typing_extensions import Protocol  # type: ignore
+
 
 ushort_struct_unpack_from = Struct('!H').unpack_from
 
@@ -261,3 +266,31 @@ def check_length_equal(length: int, msg_buf: memoryview) -> None:
         raise ProtocolError(
             f"Invalid length for message. Expected {length}, but got"
             f"{len(msg_buf)}.")
+
+
+class SyncCopyInputFile(Protocol):
+
+    def read(self, num: int) -> Union[bytes, str]:
+        ...
+
+
+class AsyncCopyInputFile(Protocol):
+
+    async def read(self, num: int) -> Union[bytes, str]:
+        ...
+
+
+class SyncCopyOutputFile(Protocol):
+
+    def write(self, data: bytes) -> int:
+        ...
+
+
+class AsyncCopyOutputFile(Protocol):
+
+    async def write(self, data: bytes) -> int:
+        ...
+
+
+SyncCopyFile = Union[SyncCopyInputFile, SyncCopyOutputFile]
+CopyFile = Union[SyncCopyFile, AsyncCopyInputFile, AsyncCopyOutputFile]

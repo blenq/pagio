@@ -2,8 +2,12 @@
 
 from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop,
-    BaseTransport, BaseProtocol)
+    BaseTransport, BaseProtocol, Task, wait, FIRST_COMPLETED, create_task)
+from concurrent.futures import ThreadPoolExecutor
+from inspect import isawaitable
+from io import IOBase
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
+from struct import Struct
 from typing import Optional, Any, Union, cast, List, Tuple
 
 import scramp
@@ -14,6 +18,17 @@ from .base_protocol import (
     _STATUS_EXECUTING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
+
+
+int_struct_pack = Struct('!i').pack
+
+
+def async_wrap(loop, func):
+
+    async def _func(*args):
+        return await loop.run_in_executor(None, func, *args)
+
+    return _func
 
 
 # pylint: disable-next=too-many-instance-attributes
@@ -27,6 +42,106 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._read_fut: Optional[Future[Any]] = None
         self._write_fut: Optional[Future[None]] = None
         self._loop = get_running_loop()
+        self._handlers.update({
+            ord('G'): self.handle_copy_in_response,
+        })
+
+    def handle_copy_in_response(self,  msg_buf: memoryview) -> None:
+        """ Schedule the task to send copy messages """
+
+        # Sending copy messages is asynchronous. Because this callback function
+        # is not synchronous, use a Task
+        create_task(self.copy_in_response_task(msg_buf, self._read_fut))
+
+    async def _copy_in_run_and_check(self, coro, read_fut) -> Tuple[bool, Any]:
+        # The server can respond with an error during streaming content.
+        # In that case, the final result Future might be set and control will
+        # be transferred back to the caller, who might execute a new statement.
+        # To prevent confusing the server, this
+        # routine must stop sending messages in such a case. So check the final
+        # result Future after while running an asynchronous operation and
+        # check for errors.
+        # If the Simple Query protocol is used, PostgreSQL will automatically
+        # send a ReadyForQuery as well, which will set the final result Future.
+        # If the Extended version is used, a Sync message must be sent to the
+        # server first.
+
+        # wait simultaneously for operation and result Future
+        coro_task = create_task(coro)
+        done = await wait(
+            (read_fut, coro_task), return_when=FIRST_COMPLETED)
+
+        if read_fut in done[0]:
+            # PostgreSQL has returned a ReadyForQuery message and probably
+            # an Error message before that, but it is ready anyway. Done.
+            return False, None
+
+        if self._ex:
+            # PostgreSQL has returned an Error
+            if self._extended_query:
+                # Extended query needs Sync message to receive Ready For Query
+                await self.write(b'S\x00\x00\x00\x04')
+            # ReadyForQuery not received yet, but should arrive shortly
+            return False, None
+
+        # Coroutine finished and no error received from server
+        return True, coro_task.result()
+
+    async def _copy_in_response_task(self, read_fut) -> None:
+        """ Stream a local file object to the server. """
+
+        if self.file_obj is None:
+            raise Exception("I can't")
+
+        # If read method of file object is not awaitable, assume it is blocking
+        # run it using a threadpool. This is actually not true for a
+        # BytesIO object for example, but better safe than sorry.
+        read_method = self.file_obj.read
+        if not isawaitable(read_method):
+            read_method = async_wrap(self._loop, read_method)
+
+        while True:
+            success, data = await self._copy_in_run_and_check(
+                read_method(8192), read_fut)
+            if not success:
+                break
+            if isinstance(data, str):
+                data = data.encode()
+            elif not isinstance(data, bytes):
+                raise Exception("No bytes")
+            if not data:
+                # End of file, tell server
+                if self._extended_query:
+                    # CopyDone + Sync message
+                    msg = b'c\x00\x00\x00\x04S\x00\x00\x00\x04'
+                else:
+                    # CopyDone message
+                    msg = b'c\x00\x00\x00\x04'
+                write_task = create_task(self.write(msg))
+                await wait((read_fut, write_task), return_when=FIRST_COMPLETED)
+                break
+            # CopyData message
+            message = [b'd', int_struct_pack(len(data) + 4), data]
+            success, _ = await self._copy_in_run_and_check(
+                self.writelines(message), read_fut)
+            if not success:
+                break
+
+    async def copy_in_response_task(
+            self, msg_buf: memoryview, read_fut) -> None:
+        try:
+            await self._copy_in_response_task(read_fut)
+        except Exception as ex:
+            # Something went wrong when reading the file. Store exception and
+            # notify server.
+            self._ex = ex
+            # Send copy fail
+            if self._extended_query:
+                # CopyFail and Sync
+                msg = b'f\0\0\0\x05\0S\x00\x00\x00\x04'
+            else:
+                msg = b'f\0\0\0\x05\0'  # CopyFail message
+            await self.write(msg)
 
     def connection_made(self, transport: BaseTransport) -> None:
         """ Callback for transport """
@@ -132,9 +247,10 @@ class _AsyncPGProtocol(_BasePGProtocol):
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
+            file_obj: IOBase,
     ) -> ResultSet:
         msg = self.execute_message(
-            sql, parameters, result_format, raw_result)
+            sql, parameters, result_format, raw_result, file_obj)
         self._read_fut = self._loop.create_future()
         await self.writelines(msg)
         self._status = _STATUS_EXECUTING
@@ -146,17 +262,18 @@ class _AsyncPGProtocol(_BasePGProtocol):
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
+            file_obj: IOBase,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:
             return await self._execute(
-                sql, parameters, result_format, raw_result)
+                sql, parameters, result_format, raw_result, file_obj)
         except (CachedQueryExpired, StatementDoesNotExist):
             # Cached statement result types are changed or is deallocated
             if self.transaction_status == TransactionStatus.IDLE:
                 # Not in a transaction, so retry is possible.
                 return await self._execute(
-                    sql, parameters, result_format, raw_result)
+                    sql, parameters, result_format, raw_result, file_obj)
             raise
 
     async def close(self) -> None:

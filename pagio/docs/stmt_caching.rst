@@ -6,7 +6,10 @@ If you encounter such problems, set the prepare_threshold to 0, to disable
 statement caching.
 
 PostgreSQL supports the use of prepared statements. A prepared statements can
-be useful for performance reasons when it is executed multiple times.
+be useful for performance reasons when it is executed multiple times. Such a
+statement is tied to the client connection and not visible to others.
+Because of this and the relatively large overhead of starting a new client
+connection, it is good practice to use long living database connections.
 
 There are
 two versions of prepared statements. The first one is a statement that is
@@ -72,7 +75,7 @@ When a statement is executed for the first time, without parameters and with
 the result format not set, pagio will use the Simple
 Query protocol. This is necessary to accommodate for a possible multi-statement
 command text. The Simple Query protocol supports only TEXT result format.
-When a single statement is executed multiple times and prepared server side, it
+When a single statement is executed multiple times, it
 will start using the Extended Query protocol. The Extended Query protocol
 will set the result format to BINARY by default if not explicitly set otherwise
 by the caller, for performance reasons.
@@ -90,7 +93,9 @@ The pagio library tries to keep track of such statements, to keep the server
 and client cache in sync,
 but if those statements are executed from a user function or similar it will
 not notice that a statement does not exist on the server anymore. When the
-statement is executed again it will fail with an error.
+statement is executed again it will fail with an error. If the failing
+statement is not running in a transaction, then the pagio Connection will
+recognize this error and recover by just executing the statement again.
 
 Another thing to keep in mind is the possible expiration of the statement.
 A statement like "SELECT * FROM table", might have different result columns or
@@ -107,9 +112,10 @@ recover from the error and the exception will be propagated to the caller.
 So be careful with running processes while making schema changes to the
 database. It does not mean that schema changes can not be performed while
 there are connected pagio clients present. It depends on the queries and the
-actual changes. For example, if SELECT statements never use '*', columns can be
-added freely.
+actual changes. For example, if SELECT statements never use '*' or don't run
+in a transaction, columns can be added freely.
 If errors do occur, they should be gone when statements are executed again. So
 calling code that survives an error, for example a web app, should recover
-after a few hickups. If that is not acceptable, either disable statement
-caching by setting the prepare_threshold to 0 or restart the client.
+after a few hiccups. If that is not acceptable, either disable statement
+caching by setting the prepare_threshold to 0 or restart the client
+connections.

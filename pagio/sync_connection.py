@@ -6,7 +6,7 @@ from types import TracebackType
 from typing import Optional, Any, Type, Tuple
 
 from .base_connection import BaseConnection, SSLMode
-from .common import ResultSet, ServerError, Format
+from .common import ResultSet, ServerError, Format, SyncCopyFile
 from .sync_protocol import PGProtocol
 
 
@@ -80,10 +80,11 @@ class Connection(BaseConnection):
             *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
             raw_result: bool = False,
+            file_obj: Optional[SyncCopyFile] = None,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         return self._protocol.execute(
-            sql, parameters, result_format, raw_result)
+            sql, parameters, result_format, raw_result, file_obj)
 
     def close(self) -> None:
         """ Closes the connection """

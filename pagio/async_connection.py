@@ -1,6 +1,7 @@
 """ Asynchronous connection class """
 
 import asyncio
+from io import IOBase
 from ssl import SSLContext
 from types import TracebackType
 from typing import Optional, Any, Generator, Type, Tuple
@@ -8,7 +9,7 @@ from typing import Optional, Any, Generator, Type, Tuple
 from .async_protocol import AsyncPGProtocol
 from .base_connection import BaseConnection, SSLMode
 from .base_protocol import ProtocolStatus
-from .common import ResultSet, ServerError, Format
+from .common import ResultSet, ServerError, Format, CopyFile
 
 
 class AsyncConnection(BaseConnection):
@@ -103,11 +104,12 @@ class AsyncConnection(BaseConnection):
             *parameters: Tuple[Any, ...],
             result_format: Format = Format.TEXT,
             raw_result: bool = False,
+            file_obj: Optional[CopyFile] = None,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:
             task = asyncio.create_task(self._protocol.execute(
-                sql, parameters, result_format, raw_result))
+                sql, parameters, result_format, raw_result, file_obj))
             # shield the task, so we can wait for it again
             return await asyncio.shield(task)
         except asyncio.CancelledError as ex:

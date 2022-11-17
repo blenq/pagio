@@ -1,6 +1,8 @@
 """ Synchronous version of Protocol """
 
+from io import IOBase
 import socket
+from struct import Struct
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
 from typing import Optional, Union, Any, List, Tuple
 
@@ -16,6 +18,8 @@ from .common import (
 
 NO_RESULT = object()
 
+int_struct_pack = Struct('!i').pack
+
 
 class _PGProtocol(_BasePGProtocol):
     """ Synchronous specific functionality of PG protocol """
@@ -28,6 +32,45 @@ class _PGProtocol(_BasePGProtocol):
         self._sock = sock
         self._sync_result = NO_RESULT
         self._status = _STATUS_CONNECTED
+        self._handlers.update({
+            ord('G'): self.handle_copy_in_response,
+        })
+
+    def _handle_copy_in_response(self) -> None:
+        if self.file_obj is None:
+            raise Exception("I can't")
+        while True:
+            data = self.file_obj.read(4096)
+            if isinstance(data, str):
+                data = data.encode()
+            elif not isinstance(data, bytes):
+                raise Exception("No bytes")
+            if not data:
+                if self._extended_query:
+                    # CopyDone + Sync message
+                    msg = b'c\x00\x00\x00\x04S\x00\x00\x00\x04'
+                else:
+                    # CopyDone message
+                    msg = b'c\x00\x00\x00\x04'
+                self.write(msg)
+                break
+            message = [b'd', int_struct_pack(len(data) + 4), data]
+            self.writelines(message)
+
+    def handle_copy_in_response(self, msg_buf: memoryview) -> None:
+        try:
+            self._handle_copy_in_response()
+        except Exception as ex:
+            # Something went wrong when reading the file. Store exception and
+            # notify server.
+            self._ex = ex
+            # Send copy fail
+            if self._extended_query:
+                # CopyFail and Sync
+                msg = b'f\0\0\0\x05\0S\x00\x00\x00\x04'
+            else:
+                msg = b'f\0\0\0\x05\0'  # CopyFail message
+            self.write(msg)
 
     def start_tls(
             self,
@@ -133,11 +176,12 @@ class _PGProtocol(_BasePGProtocol):
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
+            file_obj: IOBase,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         self.writelines(
             self.execute_message(
-                sql, parameters, result_format, raw_result))
+                sql, parameters, result_format, raw_result, file_obj))
         self._status = _STATUS_EXECUTING
         return ResultSet(self.read())
 
@@ -147,14 +191,16 @@ class _PGProtocol(_BasePGProtocol):
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
+            file_obj: IOBase,
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:
-            return self._execute(sql, parameters, result_format, raw_result)
+            return self._execute(
+                sql, parameters, result_format, raw_result, file_obj)
         except (CachedQueryExpired, StatementDoesNotExist):
             if self.transaction_status == TransactionStatus.IDLE:
                 return self._execute(
-                    sql, parameters, result_format, raw_result)
+                    sql, parameters, result_format, raw_result, file_obj)
             raise
 
     def close(self) -> None:
