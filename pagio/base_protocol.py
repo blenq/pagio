@@ -6,25 +6,20 @@ from collections import OrderedDict
 from datetime import date, datetime
 import enum
 from hashlib import md5
-from io import IOBase
 from itertools import repeat
 from struct import Struct, unpack_from, pack
+import sys
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
     Type, OrderedDict as TypingOrderedDict, Iterable)
-
-try:
-    from typing import TypedDict
-except ImportError:
-    from typing_extensions import TypedDict
-
 
 from .pgscramp import PGScrampClient
 
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct_unpack_from, Format, StatementDoesNotExist,
+    ushort_struct_unpack_from, Format, StatementDoesNotExist, CopyFile,
+    int4_struct_unpack_from, Notification,
 )
 from . import const
 from .dt import (
@@ -37,6 +32,11 @@ from .network import (
 from . import numeric
 from .text import txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+if sys.version_info >= (3, 8):
+    from typing import TypedDict
+else:
+    from typing_extensions import TypedDict
 
 STANDARD_BUF_SIZE = 0x4000
 
@@ -82,7 +82,7 @@ class TransactionStatus(enum.Enum):
     ERROR = ord('E')
 
 
-_default_converters = [decode, bytes]
+_default_converters = (decode, bytes)
 
 
 # pylint: disable-next=unused-argument
@@ -117,12 +117,12 @@ def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
     return const.BOOLOID, "B", val, 1, Format.BINARY
 
 
-DBConverter = Callable[[memoryview], Any]
-
-
 class _AbstractPGProtocol(ABC):
     _prepare_threshold: int
     _cache_size: int
+    _extended_query: bool
+    _ex: Optional[Exception]
+    file_obj: Optional[CopyFile]
 
     @abstractmethod
     def _set_result(self, result: Any) -> None:
@@ -145,13 +145,14 @@ class _AbstractPGProtocol(ABC):
         """ Notify buffer is updated with received data. """
 
     @abstractmethod
+    # pylint: disable-next=too-many-arguments
     def execute_message(
         self,
         sql: str,
         parameters: Tuple[Any, ...],
         result_format: Format,
         raw_result: bool,
-        file_obj: IOBase,
+        file_obj: Optional[CopyFile],
     ) -> List[bytes]:
         """ Executes a statement. """
 
@@ -160,12 +161,16 @@ class _AbstractPGProtocol(ABC):
         """ Handle a received message """
 
     @abstractmethod
+    def handle_copy_in_response(self, msg_buf: memoryview) -> None:
+        """ Handle a copy in response """
+
+    @abstractmethod
     def _setup_ssl_request(self) -> None:
         ...
 
     @abstractmethod
     def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
-        ...
+        """ Gets the channel binding for SASL authentication """
 
 
 CANCEL_REQUEST_CODE = 80877102
@@ -177,9 +182,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
     the PG protocol class, sync and async.
 
     """
-    res_converters: Optional[List[DBConverter]]
     _transaction_status: int
-    _ex: Optional[ServerError]
     _status: int
     _server_parameters: Dict[str, str]
     _tz_info: Optional[ZoneInfo]
@@ -193,7 +196,9 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 ('K', self.handle_backend_key_data),
                 ('I', self.handle_empty_query_response),
                 ('n', self.handle_nodata),
-            ]}
+                ('G', self.handle_copy_in_response),
+                ('A', self.handle_notification_response),
+        ]}
         self._backend: Optional[Tuple[int, int]] = None
         self.password: Union[None, bytes] = None
         self.user: Union[None, bytes] = None
@@ -417,6 +422,18 @@ class _BasePGProtocol(_AbstractPGProtocol):
         """ Handles the backend key """
         self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
 
+    def handle_notification_response(self, msg_buf: memoryview) -> None:
+        if len(msg_buf) < 6 or msg_buf[-1] != 0:
+            raise ProtocolError("Invalid notification reponse")
+        process_id = int4_struct_unpack_from(msg_buf)
+        value = decode(msg_buf[4:-1])
+        parts = value.split('\0')
+        if len(parts) != 2:
+            raise ProtocolError("Invalid notification reponse")
+        channel, payload = parts
+        self.enqueue_notification(Notification(
+            process_id=process_id, channel=channel, payload=payload))
+
     def handle_nodata(self, msg_buf: memoryview) -> None:
         """ Handles a nodata message """
         check_length_equal(0, msg_buf)
@@ -432,11 +449,11 @@ CacheKey = Union[str, Tuple[str, Tuple[int]]]
 
 
 class Statement(TypedDict):
+    """ Statement cache item """
     prepared: bool
     num_executed: int
     res_fields: Optional[Tuple[FieldInfo, ...]]
-    bin_converters: Optional[List[ResConverter]]
-    txt_converters: Optional[List[ResConverter]]
+    res_converters: Optional[List[Tuple[ResConverter, ResConverter]]]
     name: bytes
 
 
@@ -455,7 +472,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._prepare_threshold = 5
         self._cache_size = 100
         self.cache_key: Optional[CacheKey] = None
-        self._stmt_to_close: Optional[Dict[str, Any]] = None
+        self._stmt_to_close: Optional[Statement] = None
 
         # reading buffers and counters
         self._bytes_read = 0
@@ -467,18 +484,20 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         # resultset vars
         self.res_rows: Optional[List[Tuple[Any, ...]]] = None
         self.res_fields: Optional[Tuple[FieldInfo, ...]] = None
-        self.res_converters: Optional[List[ResConverter]] = None
+        self.res_converters: Optional[
+            List[Tuple[ResConverter, ResConverter]]] = None
         self._result_format = Format.DEFAULT
         self._raw_result = False
         self._extended_query = False
+        self.file_obj = None
 
         # return values
         self._result: Optional[List[Tuple[
-            Optional[List[FieldInfo]],
+            Optional[Tuple[FieldInfo, ...]],
             Optional[List[Tuple[Any, ...]]],
             str,
         ]]] = None
-        self._ex: Optional[ServerError] = None
+        self._ex = None
 
         # status vars
         self._status = _STATUS_CLOSED
@@ -499,7 +518,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 ('C', self.handle_command_complete),
                 ('Z', self.handle_ready_for_query),
             ]})
-        self.value_converters: Dict[int, Tuple[DBConverter, DBConverter]] = {
+        self.value_converters: Dict[int, Tuple[ResConverter, ResConverter]] = {
             const.INT2OID: (int, numeric.bin_int2_to_python),
             const.INT4OID: (int, numeric.bin_int_to_python),
             const.INT8OID: (int, numeric.bin_int8_to_python),
@@ -675,6 +694,9 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                         prepared = True
                         stmt_name = cache_item["name"]
                         self.res_fields = cache_item["res_fields"]
+                        if self.res_fields is not None:
+                            self.res_converters = cache_item["res_converters"]
+                            self.res_rows = []
                 else:
                     if cache_item["num_executed"] == self._prepare_threshold:
                         # Using a non-empty statement name for reuse
@@ -684,28 +706,16 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 result_format = Format.TEXT
             else:
                 result_format = Format.BINARY
-        if prepared and self.res_fields is not None:
-            if result_format == Format.TEXT:
-                conv_attr = "txt_converters"
-            else:
-                conv_attr = "bin_converters"
-            if cache_item[conv_attr] is None:
-                cache_item[conv_attr] = [
-                    self.value_converters.get(
-                        f_info.type_oid, _default_converters
-                    )[result_format] for f_info in self.res_fields]
-
-            self.res_converters = cache_item[conv_attr]
-            self.res_rows = []
         return stmt_name, prepared, result_format
 
+    # pylint: disable-next=too-many-arguments
     def execute_message(
             self,
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
-            file_obj: IOBase,
+            file_obj: Optional[CopyFile],
     ) -> List[bytes]:
         """ Executes a statement. """
 
@@ -800,9 +810,10 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Unexpected close complete message.")
 
         # Reset the statement
-        self._stmt_to_close.update(
-            prepared=False, num_executed=0, res_fields=None,
-            txt_converters=None, bin_converters=None)
+        self._stmt_to_close.update({
+            "prepared": False, "num_executed": 0, "res_fields": None,
+            "res_converters": None,
+        })
         self._stmt_to_close = None
 
     def handle_nodata(self, msg_buf: memoryview) -> None:
@@ -813,7 +824,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         """ Handles a Row Description message. """
         buffer = bytes(msg_buf)
         res_fields = []
-        converters = []
+        converters: List[Tuple[ResConverter, ResConverter]] = []
         num_fields, = ushort_struct_unpack_from(msg_buf)
 
         offset = 2
@@ -831,7 +842,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 field_name, table_oid, col_num, type_oid, type_size, type_mod,
                 _format))
             converters.append(self.value_converters.get(
-                type_oid, _default_converters)[_format])
+                type_oid, _default_converters))
             offset += field_desc_struct_size
         if offset != len(msg_buf):
             raise ProtocolError("Additional data after row description")
@@ -840,12 +851,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_converters = converters
         if self._cache_item is not None and self._cache_item["prepared"]:
             # store field_info and converters in cache
-            if _format == Format.TEXT:
-                conv_attr = "txt_converters"
-            else:
-                conv_attr = "bin_converters"
-            self._cache_item[conv_attr] = converters
-            self._cache_item["res_fields"] = res_fields
+            self._cache_item["res_converters"] = converters
+            self._cache_item["res_fields"] = self.res_fields
 
     def handle_data_row(self, buf: memoryview) -> None:
         """ Handles a DataRow message. """
@@ -863,7 +870,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             else:
                 value_converters = repeat(bytes, num_converters)
         else:
-            value_converters = self.res_converters
+            value_converters = (
+                convs[self._result_format] for convs in self.res_converters)
 
         def get_vals() -> Generator[Any, None, None]:
             offset = 2
@@ -898,10 +906,14 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_converters = None
         self.res_rows = None
 
+    # pylint: disable-next=too-many-branches
     def _handle_ready_cache(self) -> None:
 
         if self.cache_key is None:
             return
+
+        if self._result is None:
+            raise ProtocolError("Unexpected ReadyForQuery")
 
         cache_item = self._cache_item
         if cache_item is None:
@@ -926,8 +938,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                     "prepared": False,
                     "num_executed": 1,
                     "res_fields": None,
-                    "bin_converters": None,
-                    "txt_converters": None,
+                    "res_converters": None,
                     "name": stmt_name,
                 }
         else:
@@ -941,10 +952,13 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             else:
                 # Error occurred
                 if cache_item["prepared"]:
-                    if self._ex.code == "26000":
-                        cache_item.update(
-                            prepared=False, num_executed=0, res_fields=None,
-                            bin_converters=None, txt_converters=None)
+                    if (isinstance(self._ex, ServerError) and
+                            self._ex.code == "26000"):
+                        # statement does not exist on the server anymore
+                        cache_item.update({
+                            "prepared": False, "num_executed": 0,
+                            "res_fields": None, "res_converters": None,
+                        })
                     else:
                         # Statement is server side prepared, mark for closure
                         self._stmt_to_close = cache_item

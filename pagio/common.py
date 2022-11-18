@@ -12,6 +12,7 @@ except ImportError:
 
 
 ushort_struct_unpack_from = Struct('!H').unpack_from
+int4_struct_unpack_from = Struct('!i').unpack_from
 
 
 class Format(enum.IntEnum):
@@ -180,7 +181,7 @@ FieldInfo = namedtuple(
 
 class Result(NamedTuple):
     """ Result of single executed statement. """
-    fields: Optional[List[FieldInfo]]
+    fields: Optional[Tuple[FieldInfo, ...]]
     rows: Optional[List[Tuple[Any, ...]]]
     command_tag: str
 
@@ -201,7 +202,7 @@ class ResultSet:
     def __init__(
             self,
             results: List[Tuple[
-                Optional[List[FieldInfo]], Optional[List[Tuple[Any, ...]]], str
+                Optional[Tuple[FieldInfo, ...]], Optional[List[Tuple[Any, ...]]], str
             ]],
     ) -> None:
         self._results: List[Result] = [
@@ -247,7 +248,7 @@ class ResultSet:
         return self._current().records_affected
 
     @property
-    def fields(self) -> Optional[List[FieldInfo]]:
+    def fields(self) -> Optional[Tuple[FieldInfo, ...]]:
         """ List of fields """
         return self._current().fields
 
@@ -268,29 +269,39 @@ def check_length_equal(length: int, msg_buf: memoryview) -> None:
             f"{len(msg_buf)}.")
 
 
+# pylint: disable-next=too-few-public-methods
 class SyncCopyInputFile(Protocol):
-
+    """ Type definition for synchronous input file. """
     def read(self, num: int) -> Union[bytes, str]:
-        ...
+        """ Read from the file """
 
 
+# pylint: disable-next=too-few-public-methods
 class AsyncCopyInputFile(Protocol):
-
+    """ Type definition for ssynchronous input file. """
     async def read(self, num: int) -> Union[bytes, str]:
-        ...
+        """ Read from the file """
 
 
+# pylint: disable-next=too-few-public-methods
 class SyncCopyOutputFile(Protocol):
-
+    """ Type definition for synchronous output file. """
     def write(self, data: bytes) -> int:
-        ...
+        """ Write data to the file """
 
 
+# pylint: disable-next=too-few-public-methods
 class AsyncCopyOutputFile(Protocol):
-
+    """ Type definition for asynchronous output file. """
     async def write(self, data: bytes) -> int:
-        ...
+        """ Write data to the file """
 
 
 SyncCopyFile = Union[SyncCopyInputFile, SyncCopyOutputFile]
 CopyFile = Union[SyncCopyFile, AsyncCopyInputFile, AsyncCopyOutputFile]
+
+
+class Notification(NamedTuple):
+    process_id: int
+    channel: str
+    payload: str

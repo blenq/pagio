@@ -1,6 +1,6 @@
-from typing import Tuple, Any, List
+from typing import Tuple, Any, List, Optional
 
-from .common import Format
+from .common import Format, CopyFile
 
 
 class CBasePGProtocol:
@@ -20,6 +20,7 @@ class CBasePGProtocol:
         parameters: Tuple[Any, ...],
         result_format: Format,
         raw_result: bool,
+        file_obj: Optional[CopyFile],
     ) -> List[bytes]:
         ...
 

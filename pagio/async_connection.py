@@ -1,7 +1,6 @@
 """ Asynchronous connection class """
 
 import asyncio
-from io import IOBase
 from ssl import SSLContext
 from types import TracebackType
 from typing import Optional, Any, Generator, Type, Tuple
@@ -42,6 +41,10 @@ class AsyncConnection(BaseConnection):
 
     def __await__(self) -> Generator[Any, None, 'AsyncConnection']:
         return self._connect(self._ssl_mode).__await__()
+
+    @property
+    def notifications(self) -> asyncio.Queue:
+        return self._protocol.notify_queue
 
     async def _connect_protocol(self, ssl_mode: SSLMode) -> AsyncPGProtocol:
         loop = asyncio.get_running_loop()

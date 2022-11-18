@@ -1,6 +1,5 @@
 """ Synchronous version of Protocol """
 
-from io import IOBase
 import socket
 from struct import Struct
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
@@ -13,7 +12,7 @@ from .base_protocol import (
     TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED,
     _STATUS_SSL_REQUESTED, _STATUS_EXECUTING)
 from .common import (
-    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
+    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, SyncCopyFile)
 
 
 NO_RESULT = object()
@@ -26,21 +25,23 @@ class _PGProtocol(_BasePGProtocol):
 
     _prepare_threshold: int
     _cache_size: int
+    file_obj: Optional[SyncCopyFile]
 
     def __init__(self, sock: socket.socket):
         super().__init__()
         self._sock = sock
         self._sync_result = NO_RESULT
         self._status = _STATUS_CONNECTED
-        self._handlers.update({
-            ord('G'): self.handle_copy_in_response,
-        })
 
     def _handle_copy_in_response(self) -> None:
         if self.file_obj is None:
             raise Exception("I can't")
+
+        read_method = getattr(self.file_obj, "read")
+        if read_method is None:
+            raise ValueError("Invalid input file, missing read method.")
         while True:
-            data = self.file_obj.read(4096)
+            data = read_method(4096)
             if isinstance(data, str):
                 data = data.encode()
             elif not isinstance(data, bytes):
@@ -57,10 +58,12 @@ class _PGProtocol(_BasePGProtocol):
             message = [b'd', int_struct_pack(len(data) + 4), data]
             self.writelines(message)
 
+    # pylint: disable-next=unused-argument
     def handle_copy_in_response(self, msg_buf: memoryview) -> None:
+        """ Handles a copy in response """
         try:
             self._handle_copy_in_response()
-        except Exception as ex:
+        except Exception as ex:  # pylint: disable=broad-except
             # Something went wrong when reading the file. Store exception and
             # notify server.
             self._ex = ex
@@ -170,13 +173,14 @@ class _PGProtocol(_BasePGProtocol):
             raise ret
         return ret
 
+    # pylint: disable-next=too-many-arguments
     def _execute(
             self,
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
-            file_obj: IOBase,
+            file_obj: Optional[SyncCopyFile],
     ) -> ResultSet:
         """ Execute a query text and return the result """
         self.writelines(
@@ -185,13 +189,14 @@ class _PGProtocol(_BasePGProtocol):
         self._status = _STATUS_EXECUTING
         return ResultSet(self.read())
 
+    # pylint: disable-next=too-many-arguments
     def execute(
             self,
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
-            file_obj: IOBase,
+            file_obj: Optional[SyncCopyFile],
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:

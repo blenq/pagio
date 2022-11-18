@@ -103,7 +103,7 @@ def txt_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
         else:
             usec = int(usec + "0" * (6 - len(usec)))
         try:
-            return datetime(
+            return datetime(  # type: ignore
                 *(int(g) for g in match.groups()[:6]), usec)  # type:ignore
         except ValueError:
             pass
@@ -138,7 +138,7 @@ def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
                 seconds=int(match.group(11) or 0))
             if match.group(8) == '-':
                 tz_timedelta *= -1
-            return datetime(
+            return datetime(  # type: ignore
                 *(int(g) for g in match.groups()[:6]), usec,  # type: ignore
                 tzinfo=timezone(tz_timedelta))
         except ValueError:
@@ -152,13 +152,13 @@ USECS_PER_HOUR = 60 * USECS_PER_MINUTE
 USECS_PER_DAY = 24 * USECS_PER_HOUR
 
 
-def _time_vals_from_int(tm: int) -> Tuple[int, int, int, int]:
-    hour, tm = divmod(tm, USECS_PER_HOUR)
-    if tm < 0 or hour > 24:
+def _time_vals_from_int(time_val: int) -> Tuple[int, int, int, int]:
+    hour, time_val = divmod(time_val, USECS_PER_HOUR)
+    if time_val < 0 or hour > 24:
         raise ProtocolError("Invalid time value")
     hour = hour % 24
-    minute, tm = divmod(tm, USECS_PER_MINUTE)
-    second, usec = divmod(tm, USECS_PER_SEC)
+    minute, time_val = divmod(time_val, USECS_PER_MINUTE)
+    second, usec = divmod(time_val, USECS_PER_SEC)
     return hour, minute, second, usec
 
 
@@ -171,8 +171,8 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
         return 'infinity'
     if value == -0x8000000000000000:
         return '-infinity'
-    pg_ordinal, tm = divmod(value, USECS_PER_DAY)
-    hour, minute, sec, usec = _time_vals_from_int(tm)
+    pg_ordinal, time_val = divmod(value, USECS_PER_DAY)
+    hour, minute, sec, usec = _time_vals_from_int(time_val)
 
     if MIN_PG_ORDINAL <= pg_ordinal <= MAX_PG_ORDINAL:
         return datetime.combine(
@@ -194,12 +194,13 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
     # strip trailing millisecond zeroes
     usec_str = str(usec).rstrip("0") if usec else ""
 
-    return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}{7}".format(
-        year, month, day, hour, minute, sec, usec_str, bc_suffix)
+    return (
+        f"{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{sec:02}"
+        f"{usec_str}{bc_suffix}")
 
 
 def bin_timestamptz_to_python(
-        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
+        buf: memoryview, tz_info: Optional[tzinfo]) -> Union[str, datetime]:
     """ Converts PG binary timestamp value to Python datetime """
     value = bin_int8_to_python(buf)
 
@@ -208,17 +209,17 @@ def bin_timestamptz_to_python(
         return 'infinity'
     if value == -0x8000000000000000:
         return '-infinity'
-    pg_ordinal, tm = divmod(value, USECS_PER_DAY)
-    hour, minute, sec, usec = _time_vals_from_int(tm)
+    pg_ordinal, time_val = divmod(value, USECS_PER_DAY)
+    hour, minute, sec, usec = _time_vals_from_int(time_val)
 
     if MIN_PG_ORDINAL <= pg_ordinal <= MAX_PG_ORDINAL:
         try:
-            dt = datetime.combine(
+            timestamp = datetime.combine(
                 date.fromordinal(pg_ordinal + DATE_OFFSET),
                 time(hour, minute, sec, usec), tzinfo=timezone.utc)
-            if tzinfo is not None:
-                dt = dt.astimezone(tzinfo)
-            return dt
+            if tz_info is not None:
+                timestamp = timestamp.astimezone(tz_info)
+            return timestamp
         except (OverflowError, ValueError):
             pass
 
@@ -237,5 +238,6 @@ def bin_timestamptz_to_python(
     # strip trailing millisecond zeroes
     usec_str = f".{str(usec).rstrip('0')}" if usec else ""
 
-    return "{0:04}-{1:02}-{2:02} {3:02}:{4:02}:{5:02}{6}+00{7}".format(
-        year, month, day, hour, minute, sec, usec_str, bc_suffix)
+    return (
+        f"{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{sec:02}"
+        f"{usec_str}+00{bc_suffix}")

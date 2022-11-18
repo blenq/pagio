@@ -2,13 +2,14 @@
 
 from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop,
-    BaseTransport, BaseProtocol, Task, wait, FIRST_COMPLETED, create_task)
-from concurrent.futures import ThreadPoolExecutor
+    BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
+    AbstractEventLoop, Queue
+)
+from codecs import decode
 from inspect import isawaitable
-from io import IOBase
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
 from struct import Struct
-from typing import Optional, Any, Union, cast, List, Tuple
+from typing import Optional, Any, Union, cast, List, Tuple, Callable, Awaitable, Coroutine
 
 import scramp
 
@@ -17,15 +18,22 @@ from .base_protocol import (
     _STATUS_CLOSED, _STATUS_READY_FOR_QUERY, _STATUS_SSL_REQUESTED,
     _STATUS_EXECUTING)
 from .common import (
-    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist)
+    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, CopyFile,
+    Notification,
+)
 
 
 int_struct_pack = Struct('!i').pack
 
 
-def async_wrap(loop, func):
+def async_wrap(
+        loop: AbstractEventLoop, func: Callable[..., Any],
+        ) -> Callable[..., Coroutine[Any, Any, None]]:
 
-    async def _func(*args):
+    """ Wraps a synchronous callable in a coroutine """
+
+    async def _func(*args: Tuple[Any, ...]) -> Any:
+        """ Coroutine to execute synchronous callable """
         return await loop.run_in_executor(None, func, *args)
 
     return _func
@@ -42,25 +50,33 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._read_fut: Optional[Future[Any]] = None
         self._write_fut: Optional[Future[None]] = None
         self._loop = get_running_loop()
-        self._handlers.update({
-            ord('G'): self.handle_copy_in_response,
-        })
+        self.notify_queue = Queue()
+
+    def enqueue_notification(self, notification: Notification) -> None:
+        self.notify_queue.put_nowait(notification)
 
     def handle_copy_in_response(self,  msg_buf: memoryview) -> None:
         """ Schedule the task to send copy messages """
 
         # Sending copy messages is asynchronous. Because this callback function
         # is not synchronous, use a Task
-        create_task(self.copy_in_response_task(msg_buf, self._read_fut))
+        if self._read_fut is not None:
+            create_task(self.copy_in_response_task(msg_buf, self._read_fut))
 
-    async def _copy_in_run_and_check(self, coro, read_fut) -> Tuple[bool, Any]:
+    async def _copy_in_run_and_check(
+            self,
+            coro: Coroutine[Any, Any, Any],
+            read_fut: Awaitable[Any],
+    ) -> Tuple[bool, Any]:
         # The server can respond with an error during streaming content.
         # In that case, the final result Future might be set and control will
         # be transferred back to the caller, who might execute a new statement.
         # To prevent confusing the server, this
         # routine must stop sending messages in such a case. So check the final
-        # result Future after while running an asynchronous operation and
-        # check for errors.
+        # result Future after running an asynchronous operation.
+        # When the extended query protocol is used, the Future will not be set,
+        # but still an error might have occurred. Even though sending further
+        # CopyData message will not harm anything, let's just stop.
         # If the Simple Query protocol is used, PostgreSQL will automatically
         # send a ReadyForQuery as well, which will set the final result Future.
         # If the Extended version is used, a Sync message must be sent to the
@@ -87,7 +103,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # Coroutine finished and no error received from server
         return True, coro_task.result()
 
-    async def _copy_in_response_task(self, read_fut) -> None:
+    async def _copy_in_response_task(self, read_fut: Awaitable[Any]) -> None:
         """ Stream a local file object to the server. """
 
         if self.file_obj is None:
@@ -96,7 +112,10 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # If read method of file object is not awaitable, assume it is blocking
         # run it using a threadpool. This is actually not true for a
         # BytesIO object for example, but better safe than sorry.
-        read_method = self.file_obj.read
+        read_method = getattr(self.file_obj, "read")
+        if read_method is None:
+            raise ValueError("Invalid input file, missing read method.")
+
         if not isawaitable(read_method):
             read_method = async_wrap(self._loop, read_method)
 
@@ -128,10 +147,13 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 break
 
     async def copy_in_response_task(
-            self, msg_buf: memoryview, read_fut) -> None:
+            self,
+            msg_buf: memoryview,  # pylint: disable=unused-argument
+            read_fut: Awaitable[Any]) -> None:
+        """ Asycnio Task coroutine to actually handle copy in response """
         try:
             await self._copy_in_response_task(read_fut)
-        except Exception as ex:
+        except Exception as ex:  # pylint: disable=broad-except
             # Something went wrong when reading the file. Store exception and
             # notify server.
             self._ex = ex
@@ -241,13 +263,14 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._transport.write(self.cancel_message(backend_key))
         self._close()
 
+    # pylint: disable-next=too-many-arguments
     async def _execute(
             self,
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
-            file_obj: IOBase,
+            file_obj: Optional[CopyFile],
     ) -> ResultSet:
         msg = self.execute_message(
             sql, parameters, result_format, raw_result, file_obj)
@@ -256,13 +279,14 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._status = _STATUS_EXECUTING
         return ResultSet(await self._read_fut)
 
+    # pylint: disable-next=too-many-arguments
     async def execute(
             self,
             sql: str,
             parameters: Tuple[Any, ...],
             result_format: Format,
             raw_result: bool,
-            file_obj: IOBase,
+            file_obj: Optional[CopyFile],
     ) -> ResultSet:
         """ Execute a query text and return the result """
         try:
