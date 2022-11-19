@@ -175,7 +175,7 @@ class PyCopyCase(CopyCase):
 class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_db(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file()
             res = await cn.execute(
@@ -186,7 +186,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_copy_text_into_db(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
 
             file_obj = get_input_text_file()
@@ -199,7 +199,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_db_extended(self):
         # use Binary format to force Extended Query Protocol
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file()
             res = await cn.execute(
@@ -210,7 +210,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_copy_into_latin1(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file("latin-1")
 
@@ -232,7 +232,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_latin1_extended(self):
         # use binary format to force extended query
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file("latin-1")
 
@@ -253,7 +253,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_error_raising_file(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = ErrorRaisingFile(get_input_file())
             with self.assertRaises(SpecialException):
@@ -263,7 +263,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
 
     async def test_error_raising_file_extended(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = ErrorRaisingFile(get_input_file())
             with self.assertRaises(SpecialException):

@@ -173,10 +173,19 @@ class StatementDoesNotExist(ServerError):
     """ Error raised when a cached query is deallocated. """
 
 
-FieldInfo = namedtuple(
-    "FieldInfo",
-    ["field_name", "table_oid", "col_num", "type_oid", "type_size", "type_mod",
-     "format"])
+class FieldInfo(NamedTuple):
+    field_name: str
+    table_oid: int
+    col_num: int
+    type_oid: int
+    type_size: int
+    type_mod: int
+    format: int
+#
+# FieldInfo = namedtuple(
+#     "FieldInfo",
+#     ["field_name", "table_oid", "col_num", "type_oid", "type_size", "type_mod",
+#      "format"])
 
 
 class Result(NamedTuple):
@@ -302,6 +311,7 @@ CopyFile = Union[SyncCopyFile, AsyncCopyInputFile, AsyncCopyOutputFile]
 
 
 class Notification(NamedTuple):
+    """ Represents a PostgreSQL notification. """
     process_id: int
     channel: str
     payload: str

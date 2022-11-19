@@ -17,13 +17,13 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_af_unix_conn(self):
         cn = await AsyncConnection(database="postgres")
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
-        await cn.close()
+        cn.close()
 
     async def test_ip_conn(self):
         cn = await AsyncConnection(
             host='localhost', database='postgres', password='hoi\uE100')
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
-        await cn.close()
+        cn.close()
 
     async def test_not_awaited_closed(self):
         cn = AsyncConnection(database="postgres")
@@ -41,7 +41,7 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_parameter_status(self):
         cn = await AsyncConnection(database="postgres")
         self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
-        await cn.close()
+        cn.close()
 
     async def test_simple_query(self):
         cn = await AsyncConnection(database="postgres")
@@ -51,26 +51,26 @@ class ConnCase(IsolatedAsyncioTestCase):
         with self.assertRaises(ServerError):
             await cn.execute("SET TIMEZONE TO 'Europe/Pariss'")
         self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
-        await cn.close()
+        cn.close()
 
     async def test_close(self):
         cn = await AsyncConnection(database="postgres")
-        await cn.close()
-        await cn.close()
+        cn.close()
+        cn.close()
 
     async def test_context(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
 
     async def test_empty_query(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             res = await cn.execute("")
             self.assertFalse(await cn.execute(""))
             self.assertFalse(await cn.execute("-- hi"))
 
     async def test_extended_nodata(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             res = await cn.execute(
                 "SET TIMEZONE TO 'Europe/Paris'", result_format=Format.BINARY)
             self.assertIsNone(res.fields)
@@ -78,7 +78,7 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_select_cache(self):
         sql1 = "SELECT $1, $2"
         sql2 = "SELECT $1 + 1, $2 + 1, $3"
-        async with await AsyncConnection(
+        with await AsyncConnection(
                 database="postgres", prepare_threshold=4) as cn:
             # execute up to threshold
             for i in range(4):
@@ -112,7 +112,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             self.assertEqual(res.rows[0], (i + 1, None, 'hi'))
 
     async def test_max_cache(self):
-       async with await AsyncConnection(
+       with await AsyncConnection(
                database="postgres", prepare_threshold=1, cache_size=10
        ) as cn:
            await cn.execute("SELECT 1 AS val")
@@ -126,7 +126,7 @@ class ConnCase(IsolatedAsyncioTestCase):
            await cn.execute(f"SELECT 100")
 
     async def test_cache_error(self):
-        async with await AsyncConnection(
+        with await AsyncConnection(
                database="postgres", prepare_threshold=1) as cn:
             res = await cn.execute("SELECT 12 / $1 AS val", 2)
             self.assertEqual(res.rows[0], (6,))
@@ -157,7 +157,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             self.assertEqual(res.rows[0][0], 1)
 
     async def test_multi_stmt(self):
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             res = await cn.execute("BEGIN;SELECT 1;COMMIT")
             self.assertIsNone(res.fields)
             res.next_result()
@@ -166,7 +166,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             self.assertIsNone(res.fields)
 
     async def test_expired_statement(self):
-        async with await AsyncConnection(
+        with await AsyncConnection(
                 database="postgres", prepare_threshold=1) as cn:
             await cn.execute("CREATE TEMPORARY TABLE test_val (id serial, val int)")
             await cn.execute("SELECT * FROM test_val")
@@ -197,14 +197,14 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_async_timeout(self):
         # An asyncio timeout should cause a backend cancel to keep the
         # connection in a usable state
-        async with await AsyncConnection(database="postgres") as cn:
+        with await AsyncConnection(database="postgres") as cn:
             try:
                 await asyncio.wait_for(cn.execute("SELECT pg_sleep(5)"), 0.1)
             except asyncio.TimeoutError:
                 pass
             self.assertEqual(ProtocolStatus.READY_FOR_QUERY, cn.status)
 
-        async with await AsyncConnection(
+        with await AsyncConnection(
             host='localhost', database='postgres', password='hoi\uE100'
         ) as cn:
             try:
@@ -214,7 +214,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             self.assertEqual(ProtocolStatus.READY_FOR_QUERY, cn.status)
 
     async def test_discard_one(self):
-        async with await AsyncConnection(
+        with await AsyncConnection(
                 database="postgres", prepare_threshold=1) as cn:
             await cn.execute("SELECT 1")
             await cn.execute("SELECT 1")
@@ -227,7 +227,7 @@ class ConnCase(IsolatedAsyncioTestCase):
             res = await cn.execute("SELECT 1")
             self.assertEqual(1, res.rows[0][0])
 
-            res = await cn.execute("SELECT 1")
+            await cn.execute("SELECT 1")
             await cn.execute("BEGIN")
             res = await cn.execute("SELECT name FROM pg_prepared_statements")
             await cn.execute("DEALLOCATE  " + res.rows[0][0])

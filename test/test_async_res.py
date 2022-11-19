@@ -119,4 +119,4 @@ class ResultCase(IsolatedAsyncioTestCase):
             (struct.pack("!i", 123), struct.pack("!i", 2000000000)), res[0])
 
     async def asyncTearDown(self) -> None:
-        await self._cn.close()
+        self._cn.close()

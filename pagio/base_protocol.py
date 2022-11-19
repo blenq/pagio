@@ -172,6 +172,10 @@ class _AbstractPGProtocol(ABC):
     def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
         """ Gets the channel binding for SASL authentication """
 
+    @abstractmethod
+    def enqueue_notification(self, notification: Notification) -> None:
+        """ Puts a notification in the queue. """
+
 
 CANCEL_REQUEST_CODE = 80877102
 
@@ -425,7 +429,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
     def handle_notification_response(self, msg_buf: memoryview) -> None:
         if len(msg_buf) < 6 or msg_buf[-1] != 0:
             raise ProtocolError("Invalid notification reponse")
-        process_id = int4_struct_unpack_from(msg_buf)
+        process_id = int4_struct_unpack_from(msg_buf)[0]
         value = decode(msg_buf[4:-1])
         parts = value.split('\0')
         if len(parts) != 2:

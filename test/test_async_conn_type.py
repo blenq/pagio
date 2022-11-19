@@ -16,7 +16,7 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         self._cn = await AsyncConnection(database="postgres")
 
     async def asyncTearDown(self) -> None:
-        await self._cn.close()
+        self._cn.close()
 
     async def _test_val_result(self, sql, val):
         res = await self._cn.execute(sql)

@@ -3,7 +3,7 @@
 from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop,
     BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
-    AbstractEventLoop, Queue
+    AbstractEventLoop, Queue, CancelledError,
 )
 from codecs import decode
 from inspect import isawaitable
@@ -50,7 +50,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._read_fut: Optional[Future[Any]] = None
         self._write_fut: Optional[Future[None]] = None
         self._loop = get_running_loop()
-        self.notify_queue = Queue()
+        self.notify_queue: Queue[Notification] = Queue()
 
     def enqueue_notification(self, notification: Notification) -> None:
         self.notify_queue.put_nowait(notification)
@@ -227,7 +227,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._setup_ssl_request()
 
         self._read_fut = self._loop.create_future()
-        await self.write(b'\0\0\0\x08\x04\xd2\x16/')
+        self._transport.write(b'\0\0\0\x08\x04\xd2\x16/')
         return cast(bool, await self._read_fut)
 
     def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
@@ -255,13 +255,16 @@ class _AsyncPGProtocol(_BasePGProtocol):
             prepare_threshold, cache_size)
         while isinstance(message, bytes):
             self._read_fut = self._loop.create_future()
-            await self.write(message)
+            self._transport.write(message)
             message = await self._read_fut
 
     def cancel(self, backend_key: Tuple[int, int]) -> None:
         """ Sends a Cancel Request message """
         self._transport.write(self.cancel_message(backend_key))
         self._close()
+
+    def __await__(self):
+        return self._read_fut.__await__()
 
     # pylint: disable-next=too-many-arguments
     async def _execute(
@@ -275,7 +278,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         msg = self.execute_message(
             sql, parameters, result_format, raw_result, file_obj)
         self._read_fut = self._loop.create_future()
-        await self.writelines(msg)
+        self._transport.writelines(msg)
         self._status = _STATUS_EXECUTING
         return ResultSet(await self._read_fut)
 
@@ -299,11 +302,19 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 return await self._execute(
                     sql, parameters, result_format, raw_result, file_obj)
             raise
+        except CancelledError:
+            if self._status == _STATUS_EXECUTING:
+                # Execution is cancelled, for example by timeout. To keep
+                # protocol in usable state, the AsyncConnection will try to
+                # cancel it server side as well. Recreate the future, so
+                # the AsyncConnection can wait for cancellation to finish
+                self._read_fut = self._loop.create_future()
+            raise
 
-    async def close(self) -> None:
+    def close(self) -> None:
         """ Closes the connection """
         if self._status == _STATUS_READY_FOR_QUERY:
-            await self.writelines([self.terminate_message()])
+            self._transport.write(self.terminate_message())
         self._close()
 
     def _close(self) -> None:

@@ -8,7 +8,7 @@ from typing import Optional, Any, Generator, Type, Tuple
 from .async_protocol import AsyncPGProtocol
 from .base_connection import BaseConnection, SSLMode
 from .base_protocol import ProtocolStatus
-from .common import ResultSet, ServerError, Format, CopyFile
+from .common import ResultSet, ServerError, Format, CopyFile, Notification
 
 
 class AsyncConnection(BaseConnection):
@@ -43,7 +43,8 @@ class AsyncConnection(BaseConnection):
         return self._connect(self._ssl_mode).__await__()
 
     @property
-    def notifications(self) -> asyncio.Queue:
+    def notifications(self):  # type: () -> asyncio.Queue[Notification]
+        """ Notification queue """
         return self._protocol.notify_queue
 
     async def _connect_protocol(self, ssl_mode: SSLMode) -> AsyncPGProtocol:
@@ -99,7 +100,7 @@ class AsyncConnection(BaseConnection):
         # new connection with backend key info of the current connection
         if self.status is ProtocolStatus.EXECUTING:
             prot.cancel(self._protocol.backend_key)
-        await prot.close()
+        prot.close()
 
     async def execute(
             self,
@@ -110,33 +111,35 @@ class AsyncConnection(BaseConnection):
             file_obj: Optional[CopyFile] = None,
     ) -> ResultSet:
         """ Execute a query text and return the result """
+
         try:
-            task = asyncio.create_task(self._protocol.execute(
-                sql, parameters, result_format, raw_result, file_obj))
-            # shield the task, so we can wait for it again
-            return await asyncio.shield(task)
+            return await self._protocol.execute(
+                sql, parameters, result_format, raw_result, file_obj)
         except asyncio.CancelledError as ex:
             # Task is cancelled, for example due to a timeout. Try to cancel
             # statement server side as well to keep connection usable.
             try:
-                await asyncio.wait_for(self.cancel(), 2)
-                # Task was shielded, so we can wait for it again.
-                await asyncio.wait_for(task, 2)
+                if self.status is not ProtocolStatus.READY_FOR_QUERY:
+                    await asyncio.wait_for(self.cancel(), 2)
+                # Cancel has been sent on 2nd connection, now wait for
+                # first to actually notice.
+                await asyncio.wait_for(self._protocol, 2)
             finally:
+                if self.status is not ProtocolStatus.READY_FOR_QUERY:
+                    self.close()
                 raise ex
 
-
-    async def close(self) -> None:
+    def close(self) -> None:
         """ Closes the connection """
-        await self._protocol.close()
+        self._protocol.close()
 
-    async def __aenter__(self) -> 'AsyncConnection':
+    def __enter__(self) -> 'AsyncConnection':
         return self
 
-    async def __aexit__(
+    def __exit__(
             self,
             exc_type: Optional[Type[BaseException]],
             exc: Optional[BaseException],
             traceback: Optional[TracebackType],
-    ) -> None:
-        await self.close()
+            ) -> None:
+        self.close()

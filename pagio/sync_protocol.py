@@ -1,9 +1,10 @@
 """ Synchronous version of Protocol """
 
+from collections import deque
 import socket
 from struct import Struct
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
-from typing import Optional, Union, Any, List, Tuple
+from typing import Optional, Union, Any, List, Tuple, Deque
 
 import scramp
 
@@ -12,7 +13,9 @@ from .base_protocol import (
     TransactionStatus, _STATUS_CLOSED, _STATUS_CONNECTED,
     _STATUS_SSL_REQUESTED, _STATUS_EXECUTING)
 from .common import (
-    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, SyncCopyFile)
+    ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, SyncCopyFile,
+    Notification,
+)
 
 
 NO_RESULT = object()
@@ -29,9 +32,13 @@ class _PGProtocol(_BasePGProtocol):
 
     def __init__(self, sock: socket.socket):
         super().__init__()
-        self._sock = sock
+        self.sock = sock
         self._sync_result = NO_RESULT
         self._status = _STATUS_CONNECTED
+        self.notify_queue: Deque[Notification] = deque()
+
+    def enqueue_notification(self, notification: Notification) -> None:
+        self.notify_queue.append(notification)
 
     def _handle_copy_in_response(self) -> None:
         if self.file_obj is None:
@@ -93,10 +100,10 @@ class _PGProtocol(_BasePGProtocol):
             ssl = SSLContext(PROTOCOL_TLS_CLIENT)
             ssl.check_hostname = False
             ssl.verify_mode = VerifyMode.CERT_NONE
-        self._sock.settimeout(ssl_handshake_timeout)
-        self._sock = ssl.wrap_socket(
-            self._sock, server_hostname=server_hostname)
-        self._sock.settimeout(None)
+        self.sock.settimeout(ssl_handshake_timeout)
+        self.sock = ssl.wrap_socket(
+            self.sock, server_hostname=server_hostname)
+        self.sock.settimeout(None)
 
         return True
 
@@ -111,9 +118,9 @@ class _PGProtocol(_BasePGProtocol):
     def get_channel_binding(self) -> Optional[Tuple[str, bytes]]:
         """ Returns the channel binding for SASL authentication """
 
-        if isinstance(self._sock, SSLSocket):
+        if isinstance(self.sock, SSLSocket):
             return scramp.make_channel_binding(
-                "tls-server-end-point", self._sock)
+                "tls-server-end-point", self.sock)
         # No SSL in use so channel binding is not used either
         return None
 
@@ -139,7 +146,7 @@ class _PGProtocol(_BasePGProtocol):
     def write(self, data: bytes) -> None:
         """ Send data to the server """
         try:
-            self._sock.sendall(data)
+            self.sock.sendall(data)
         except (SystemExit, KeyboardInterrupt):
             raise
         except BaseException:
@@ -150,18 +157,19 @@ class _PGProtocol(_BasePGProtocol):
         """ Send multiple data chunks to the server """
         self.write(b''.join(data))
 
+    def poll(self) -> None:
+        """ Make a single read pass """
+        num_bytes = self.sock.recv_into(self.get_buffer(-1))
+        if num_bytes == 0:
+            self._close()
+            raise ValueError("Connection closed")
+        self.buffer_updated(num_bytes)
+
     def read(self) -> Any:
         """ Read data from server and handle returned data """
-        recv_into = self._sock.recv_into
-        get_buffer = self.get_buffer
-        buffer_updated = self.buffer_updated
         while self._sync_result is NO_RESULT:
-            num_bytes = recv_into(get_buffer(-1))
-            if num_bytes == 0:
-                self._close()
-                continue
             try:
-                buffer_updated(num_bytes)
+                self.poll()
             except (SystemExit, KeyboardInterrupt):
                 raise
             except BaseException as ex:  # pylint: disable=broad-except
@@ -221,7 +229,7 @@ class _PGProtocol(_BasePGProtocol):
         self._close()
 
     def _close(self) -> None:
-        self._sock.close()
+        self.sock.close()
         self._status = _STATUS_CLOSED
 
     def _set_exception(self, ex: BaseException) -> None:
@@ -229,6 +237,43 @@ class _PGProtocol(_BasePGProtocol):
 
     def _set_result(self, result: Any) -> None:
         self._sync_result = result
+
+
+class QueueEmpty(Exception):
+    """ Raised when no notifications are available """
+
+
+class NotificationQueue:
+    """ Queue for notifications """
+    def __init__(self, protocol: _PGProtocol) -> None:
+        self._protocol = protocol
+
+    def get(self, timeout: Optional[float] = None) -> Notification:
+        """ Gets a notification """
+
+        try:
+            self._protocol.sock.settimeout(timeout)
+            while not self._protocol.notify_queue:
+                self._protocol.poll()
+        except (socket.timeout, BlockingIOError) as ex:
+            raise QueueEmpty from ex
+        finally:
+            self._protocol.sock.settimeout(None)
+
+        return self._protocol.notify_queue.popleft()
+
+    def get_nowait(self) -> Notification:
+        """ Gets a notification from the queue without waiting """
+
+        return self.get(timeout=0)
+
+    def qsize(self) -> int:
+        """ Returns the size of the queue """
+        return len(self._protocol.notify_queue)
+
+    def empty(self) -> bool:
+        """ Indicates if the queue is empty """
+        return self.qsize() == 0
 
 
 class PyPGProtocol(PyBasePGProtocol, _PGProtocol):

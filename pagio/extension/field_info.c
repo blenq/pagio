@@ -21,15 +21,14 @@ static PyStructSequence_Desc PagioFieldInfo_Desc = {
 };
 
 
-PyTypeObject *PagioFieldInfo_Type;
+static PyTypeObject _PagioFieldInfo_Type;
+
+PyTypeObject *PagioFieldInfo_Type = &_PagioFieldInfo_Type;
 
 
 int
 PagioFieldInfo_Init() {
 
-    PagioFieldInfo_Type = PyStructSequence_NewType(&PagioFieldInfo_Desc);
-    if (PagioFieldInfo_Type == NULL) {
-        return -1;
-    }
-    return 0;
+    return PyStructSequence_InitType2(PagioFieldInfo_Type, &PagioFieldInfo_Desc);
+    // PyStructSequence_NewType breaks on python3.7 (https://bugs.python.org/issue34784)
 }

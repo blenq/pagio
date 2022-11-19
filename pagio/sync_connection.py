@@ -7,7 +7,7 @@ from typing import Optional, Any, Type, Tuple
 
 from .base_connection import BaseConnection, SSLMode
 from .common import ResultSet, ServerError, Format, SyncCopyFile
-from .sync_protocol import PGProtocol
+from .sync_protocol import PGProtocol, NotificationQueue
 
 
 HAS_TCP_NODELAY = hasattr(socket, 'TCP_NODELAY')
@@ -39,6 +39,7 @@ class Connection(BaseConnection):
             prepare_threshold=prepare_threshold, cache_size=cache_size,
         )
         self._protocol: PGProtocol = self._connect(self._ssl_mode)
+        self._notifications = NotificationQueue(self._protocol)
 
     def _connect(self, ssl_mode: SSLMode) -> PGProtocol:
         # connect socket
@@ -73,6 +74,13 @@ class Connection(BaseConnection):
                 return self._connect(ssl_mode=SSLMode.REQUIRE)
             raise
         return prot
+
+    @property
+    def notifications(self) -> NotificationQueue:
+        """ Notification Queue """
+        if self._notifications is None:
+            raise ValueError("Notification queue not set")
+        return self._notifications
 
     def execute(
             self,
