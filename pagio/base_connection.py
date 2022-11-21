@@ -75,15 +75,15 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
 
     _protocol: Optional[_BasePGProtocol] = None
 
-    def __init__(  # pylint: disable=too-many-arguments
+    def __init__(
             self,
             host: Optional[str] = None,
             port: Optional[int] = None,
             database: Optional[str] = None,
             user: Optional[str] = None,
             password: Optional[Union[str, bytes]] = None,
-            tz_name: Optional[str] = None,
             *,
+            tz_name: Optional[str] = None,
             ssl_mode: SSLMode = SSLMode.DEFAULT,
             ssl: Optional[SSLContext] = None,
             local_addr: Optional[Tuple[str, int]] = None,

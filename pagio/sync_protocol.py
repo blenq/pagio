@@ -181,7 +181,6 @@ class _PGProtocol(_BasePGProtocol):
             raise ret
         return ret
 
-    # pylint: disable-next=too-many-arguments
     def _execute(
             self,
             sql: str,
@@ -197,7 +196,6 @@ class _PGProtocol(_BasePGProtocol):
         self._status = _STATUS_EXECUTING
         return ResultSet(self.read())
 
-    # pylint: disable-next=too-many-arguments
     def execute(
             self,
             sql: str,

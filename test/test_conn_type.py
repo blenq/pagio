@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
 import unittest
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pagio import Connection, sync_connection, sync_protocol, Format
 from pagio.zoneinfo import ZoneInfo
@@ -16,12 +16,12 @@ class ConnTypeCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._cn.close()
 
-    def _test_val_result(self, sql, val):
-        res = self._cn.execute(sql)
+    def _test_val_result(self, sql, val, *params):
+        res = self._cn.execute(sql, *params)
         self.assertEqual(val, res[0][0])
-        res = self._cn.execute(sql, result_format=Format.TEXT)
+        res = self._cn.execute(sql, *params, result_format=Format.TEXT)
         self.assertEqual(val, res[0][0])
-        res = self._cn.execute(sql, result_format=Format.BINARY)
+        res = self._cn.execute(sql, *params, result_format=Format.BINARY)
         self.assertEqual(val, res[0][0])
 
     def test_ipv4_inet_result(self):
@@ -94,6 +94,19 @@ class ConnTypeCase(unittest.TestCase):
             self._test_numeric_val(
                 "SELECT '-inf'::numeric", Decimal("-inf"))
 
+    def test_numeric_param(self):
+        for val_str in [
+            "12.34", "Infinity", "inf", "-infinity", "-inf", "1.234e123",
+            "8.7654e-765",
+        ]:
+            val = Decimal(val_str)
+            self._test_val_result("SELECT $1", val, val)
+        with Connection(database="postgres") as cn:
+            for val_str in ["Nan", "-NaN", "sNaN", "-sNaN"]:
+                val = Decimal(val_str)
+                res = cn.execute("SELECT $1", val)
+                self.assertTrue(res.rows[0][0].is_nan())
+
     def test_bytea_result(self):
         self._cn.execute("SET bytea_output TO 'hex'")
         self._test_val_result("SELECT '\\x09686f695c'::bytea", b'\thoi\\')
@@ -104,6 +117,10 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT '42d36a04-8ff1-4337-870e-51de61b19771'::uuid",
             UUID('42d36a04-8ff1-4337-870e-51de61b19771'))
+
+    def test_uuid_param(self):
+        val = uuid4()
+        self._test_val_result("SELECT $1", val, val)
 
     def test_date_result(self):
         self._test_val_result(
@@ -220,8 +237,8 @@ class ConnTypeCase(unittest.TestCase):
                     timedelta(hours=1))))
         self._cn.execute("SET TIMEZONE TO '-02:30'")
         self._test_tstz_val(
-            "SELECT '2021-03-15 14:10:03'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, tzinfo=timezone(
+            "SELECT '2021-03-15 14:11:03'::timestamptz", datetime(
+                2021, 3, 15, 14, 11, 3, tzinfo=timezone(
                     timedelta(hours=2, minutes=30))))
         res = self._cn.execute(
             "SELECT '2021-03-15 14:10:03 BC'::timestamptz",
@@ -259,6 +276,15 @@ class ConnTypeCase(unittest.TestCase):
             datetime(2, 3, 15, 14, 10, 8, tzinfo=timezone(timedelta(days=-1, seconds=65364)))
         )
 
+    def test_jsonb_result(self):
+        self._test_val_result(
+            "SELECT '{\"hello\": \"world\"}'::jsonb",
+            {"hello": "world"})
+
+    def test_json_result(self):
+        self._test_val_result(
+            "SELECT '{\"hello\": \"world\"}'::json",
+            {"hello": "world"})
 
 
 class PyConnTypeCase(ConnTypeCase):

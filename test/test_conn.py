@@ -1,5 +1,6 @@
+import gc
 import unittest
-import sys
+import weakref
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
@@ -265,6 +266,16 @@ class ConnCase(unittest.TestCase):
             self.assertEqual(res.rows[0][0], 1)
             res = cn.execute("SELECT 1")
             self.assertEqual(1, res.rows[0][0])
+
+    def test_weakrefs(self):
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.execute("SELECT 1")
+            wr = weakref.ref(cn)
+            gc.collect()
+            self.assertIs(cn, wr())
+        del cn
+        gc.collect()
+        self.assertIsNone(wr())
 
 
 class PyConnCase(ConnCase):

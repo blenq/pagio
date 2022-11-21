@@ -1,6 +1,5 @@
 """ Common functionality """
 
-from collections import namedtuple
 import enum
 from struct import Struct
 from typing import Tuple, Any, Optional, Union, List, Iterator, NamedTuple
@@ -174,6 +173,7 @@ class StatementDoesNotExist(ServerError):
 
 
 class FieldInfo(NamedTuple):
+    """ Field information """
     field_name: str
     table_oid: int
     col_num: int
@@ -181,11 +181,6 @@ class FieldInfo(NamedTuple):
     type_size: int
     type_mod: int
     format: int
-#
-# FieldInfo = namedtuple(
-#     "FieldInfo",
-#     ["field_name", "table_oid", "col_num", "type_oid", "type_size", "type_mod",
-#      "format"])
 
 
 class Result(NamedTuple):

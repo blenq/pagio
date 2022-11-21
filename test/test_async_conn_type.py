@@ -1,7 +1,8 @@
+import uuid
 from datetime import date
 from decimal import Decimal
 from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
-from uuid import UUID
+from uuid import UUID, uuid4
 try:
     from unittest import IsolatedAsyncioTestCase
 except ImportError:
@@ -18,12 +19,12 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self._cn.close()
 
-    async def _test_val_result(self, sql, val):
-        res = await self._cn.execute(sql)
+    async def _test_val_result(self, sql, val, *params):
+        res = await self._cn.execute(sql, *params)
         self.assertEqual(val, res[0][0])
-        res = await self._cn.execute(sql, result_format=Format.TEXT)
+        res = await self._cn.execute(sql, *params, result_format=Format.TEXT)
         self.assertEqual(val, res[0][0])
-        res = await self._cn.execute(sql, result_format=Format.BINARY)
+        res = await self._cn.execute(sql, *params, result_format=Format.BINARY)
         self.assertEqual(val, res[0][0])
 
     async def test_ipv4_inet_result(self):
@@ -102,6 +103,10 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
             "SELECT '42d36a04-8ff1-4337-870e-51de61b19771'::uuid",
             UUID('42d36a04-8ff1-4337-870e-51de61b19771'))
 
+    async def test_uuid_param(self):
+        val = uuid4()
+        await self._test_val_result("SELECT $1", val, val)
+
     async def test_date_result(self):
         await self._test_val_result(
             "SELECT '2021-03-15'::date", date(2021, 3, 15))
@@ -122,6 +127,16 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         res = await self._cn.execute(
             "SELECT '2021-03-15'::date", result_format=Format.BINARY)
         self.assertEqual(date(2021, 3, 15), res[0][0])
+
+    async def test_jsonb_result(self):
+        await self._test_val_result(
+            "SELECT '{\"hello\": \"world\"}'::jsonb",
+            {"hello": "world"})
+
+    async def test_json_result(self):
+        await self._test_val_result(
+            "SELECT '{\"hello\": \"world\"}'::json",
+            {"hello": "world"})
 
 
 class PyConnTypeCase(ConnTypeCase):

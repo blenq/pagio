@@ -15,6 +15,8 @@
 
 #define NUMERICOID 1700
 
+PyObject *Decimal;
+
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 11
 // Define Python 3.11 style functions for lower Python version
 
@@ -53,5 +55,7 @@ int fill_long_info(
 
 PyObject *convert_pg_numeric_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numeric_bin(PPObject *self, char *buf, int len);
+int fill_numeric_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param);
 
 #endif /* _PAGIO_NUMERIC_H */

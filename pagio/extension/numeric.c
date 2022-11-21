@@ -257,7 +257,7 @@ fill_bool_info(
 
 // ================ numeric ================================================ //
 
-static PyObject *Decimal;
+PyObject *Decimal;
 
 
 PyObject *
@@ -362,6 +362,51 @@ end:
 }
 
 
+PyObject *is_nan;
+
+int
+fill_numeric_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    PyObject *nan;
+    static char *nan_str = "NaN";
+    int nan_true;
+
+    nan = PyObject_CallMethodNoArgs(param, is_nan);
+    if (nan == NULL) {
+        return -1;
+    }
+    nan_true = PyObject_IsTrue(nan);
+    Py_DECREF(nan);
+    if (nan_true == -1) {
+        return -1;
+    }
+    if (nan_true) {
+        param_info->ptr = nan_str;
+        param_info->len = 3;
+    }
+    else {
+        PyObject *val_str;
+        Py_ssize_t size;
+
+        val_str = PyObject_Str(param);
+        if (val_str == NULL) {
+            return -1;
+        }
+        param_info->ptr = PyUnicode_AsUTF8AndSize(val_str, &size);
+        if (size > INT32_MAX) {
+            Py_DECREF(val_str);
+            PyErr_SetString(PyExc_ValueError, "String parameter too long");
+            return -1;
+        }
+        param_info->len = (int) size;
+        param_info->obj = val_str;
+    }
+    *oid = NUMERICOID;
+    return 0;
+}
+
+
 int
 init_numeric(void)
 {
@@ -378,5 +423,9 @@ init_numeric(void)
         return -1;
     }
     Py_DECREF(decimal_module);
+    is_nan = PyUnicode_InternFromString("is_nan");
+    if (is_nan == NULL) {
+        return -1;
+    }
     return 0;
 }

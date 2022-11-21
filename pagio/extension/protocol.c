@@ -7,6 +7,7 @@
 #include "text.h"
 #include "uuid.h"
 #include "datetime.h"
+#include "json.h"
 
 
 #define _STATUS_CLOSED 0
@@ -167,24 +168,57 @@ PP_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 }
 
 
-static void
-PP_dealloc(PPObject *self)
+static int
+PP_traverse(PPObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->buf);
+    Py_VISIT(self->res_rows);
+    Py_VISIT(self->res_fields);
+    Py_VISIT(self->result);
+    Py_VISIT(self->ex);
+    Py_VISIT(self->file_obj);
+    Py_VISIT(self->cache_key);
+    Py_VISIT(self->cache_item);
+    Py_VISIT(self->stmt_cache);
+    Py_VISIT(self->stmt_to_close);
+    Py_VISIT(self->server_parameters);
+    Py_VISIT(self->zone_info);
+    Py_VISIT(self->res_fields);
+    return 0;
+}
+
+
+static int
+PP_clear(PPObject *self)
 {
     Py_CLEAR(self->buf);
     Py_CLEAR(self->res_rows);
     Py_CLEAR(self->res_fields);
     Py_CLEAR(self->result);
     Py_CLEAR(self->ex);
+    Py_CLEAR(self->file_obj);
     Py_CLEAR(self->cache_key);
     if (self->res_converters) {
         if (!self->cache_item || !PagioST_PREPARED(self->cache_item)) {
             PyMem_Free(self->res_converters);
         }
+        self->res_converters = NULL;
     }
     Py_CLEAR(self->cache_item);
     Py_CLEAR(self->stmt_cache);
+    Py_CLEAR(self->stmt_to_close);
     Py_CLEAR(self->server_parameters);
     Py_CLEAR(self->zone_info);
+    return 0;
+}
+
+
+static void
+PP_dealloc(PPObject *self)
+{
+    PyObject_GC_UnTrack(self);
+    PP_clear(self);
+
     if (self->buf_ptr != self->standard_buf_ptr) {
         PyMem_Free(self->buf_ptr);
     }
@@ -206,7 +240,7 @@ PPget_buffer(PPObject *self, PyObject *arg)
 }
 
 
-static int
+static inline int
 PPhandle_parameter_status(PPObject *self, char **buf, char *end) {
     char *end_name;
     int ret;
@@ -280,6 +314,8 @@ get_converters(unsigned int type_oid) {
             convert_pg_timestamp_text, convert_pg_timestamp_bin},
         timestamptz_converters[2] = {
             convert_pg_timestamptz_text, convert_pg_timestamptz_bin},
+        jsonb_converters[2] = {convert_pg_json_txt, convert_pg_jsonb_bin},
+        json_converters[2] = {convert_pg_json_txt, convert_pg_json_txt},
         default_converters[2] = {convert_pg_text, convert_pg_binary};
 
     switch (type_oid) {
@@ -319,6 +355,10 @@ get_converters(unsigned int type_oid) {
         return timestamp_converters;
     case TIMESTAMPTZOID:
         return timestamptz_converters;
+    case JSONBOID:
+        return jsonb_converters;
+    case JSONOID:
+        return json_converters;
     default:
         return default_converters;
     }
@@ -404,7 +444,7 @@ error:
 }
 
 
-static int
+static inline int
 PPhandle_rowdescription(PPObject *self, char **buf, char *end)
 {
     unsigned short num_cols;
@@ -485,7 +525,7 @@ PPfallback_handler(PPObject *self, char **buf, char *end) {
 }
 
 
-static int
+static inline int
 PPhandle_datarow(PPObject *self, char **buf, char *end) {
 
     unsigned short num_cols;
@@ -559,7 +599,7 @@ end:
 }
 
 
-static int
+static inline int
 PPhandle_close_complete(PPObject *self, char **buf, char *end) {
     if (*buf != end) {
         PyErr_SetString(PyExc_ValueError, "Invalid Close Complete message.");
@@ -576,7 +616,7 @@ PPhandle_close_complete(PPObject *self, char **buf, char *end) {
 }
 
 
-static int
+static inline int
 PPhandle_parse_complete(PPObject *self, char **buf, char *end) {
     if (*buf != end) {
         PyErr_SetString(PyExc_ValueError, "Invalid parse complete message.");
@@ -590,7 +630,7 @@ PPhandle_parse_complete(PPObject *self, char **buf, char *end) {
 }
 
 
-static int
+static inline int
 PPhandle_bind_complete(PPObject *self, char **buf, char *end) {
     if (*buf != end) {
         PyErr_SetString(PyExc_ValueError, "Invalid parse complete message.");
@@ -600,7 +640,17 @@ PPhandle_bind_complete(PPObject *self, char **buf, char *end) {
 }
 
 
-static int
+static inline int
+PPhandle_nodata(PPObject *self, char **buf, char *end) {
+    if (*buf != end) {
+        PyErr_SetString(PyExc_ValueError, "Invalid nodata message.");
+        return -1;
+    }
+    return 0;
+}
+
+
+static inline int
 PPhandle_command_complete(PPObject *self, char **buf, char *end) {
     PyObject *tag = NULL, *result_set = NULL, *item;
 
@@ -752,7 +802,7 @@ ready_cache(PPObject *self) {
 }
 
 
-static int
+static inline int
 PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
 {
     PyObject *ret;
@@ -787,37 +837,40 @@ PPhandle_ready_for_query(PPObject *self, char **buf, char *end)
 }
 
 
-static int
+static inline int
 PPhandle_message(PPObject *self, char *buf) {
     char *end;
-    int(*handler)(PPObject*, char**, char*);
+    int ret;
 
 //    fprintf(stderr, "Identifier: %c\n", self->identifier);
     end = buf + self->msg_len;
     switch (self->identifier) {
     case 'S':
-        handler = PPhandle_parameter_status;
+        ret = PPhandle_parameter_status(self, &buf, end);
         break;
     case 'T':
-        handler = PPhandle_rowdescription;
+        ret = PPhandle_rowdescription(self, &buf, end);
+        break;
+    case 'n':
+        ret = PPhandle_nodata(self, &buf, end);
         break;
     case 'D':
-        handler = PPhandle_datarow;
+        ret = PPhandle_datarow(self, &buf, end);
         break;
     case '1':
-        handler = PPhandle_parse_complete;
+        ret = PPhandle_parse_complete(self, &buf, end);
         break;
     case '2':
-        handler = PPhandle_bind_complete;
+        ret = PPhandle_bind_complete(self, &buf, end);
         break;
     case '3':
-        handler = PPhandle_close_complete;
+        ret = PPhandle_close_complete(self, &buf, end);
         break;
     case 'C':
-        handler = PPhandle_command_complete;
+        ret = PPhandle_command_complete(self, &buf, end);
         break;
     case 'Z':
-        handler = PPhandle_ready_for_query;
+        ret = PPhandle_ready_for_query(self, &buf, end);
         break;
     case 'E':
         if (self->res_converters) {
@@ -830,12 +883,12 @@ PPhandle_message(PPObject *self, char *buf) {
         }
         Py_CLEAR(self->res_rows);
         Py_CLEAR(self->res_fields);
-        handler = PPfallback_handler;
+        ret = PPfallback_handler(self, &buf, end);
         break;
     default:
-        handler = PPfallback_handler;
+        ret = PPfallback_handler(self, &buf, end);
     }
-    if (handler(self, &buf, end) == -1) {
+    if (ret == -1) {
         return -1;
     }
     if (buf != end) {
@@ -953,17 +1006,23 @@ fill_param_info(
         param_info->len = -1;
         ret = 0;
     }
-    else if (PyUnicode_Check(param)) {
+    else if (PyUnicode_CheckExact(param)) {
         ret = fill_unicode_info(param_info, &oid, &fmt, param);
     }
     else if (PyBool_Check(param)) {
         ret = fill_bool_info(param_info, &oid, &fmt, param);
     }
-    else if (PyLong_Check(param)) {
+    else if (PyLong_CheckExact(param)) {
         ret = fill_long_info(param_info, &oid, &fmt, param);
     }
-    else if (PyFloat_Check(param)) {
+    else if (PyFloat_CheckExact(param)) {
         ret = fill_float_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)UUID) {
+        ret = fill_uuid_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)Decimal) {
+        ret = fill_numeric_info(param_info, &oid, &fmt, param);
     }
     else {
         ret = fill_object_info(param_info, &oid, &fmt, param);
@@ -1568,9 +1627,11 @@ static PyTypeObject PPType = {
     .tp_doc = PyDoc_STR("Base Protocol"),
     .tp_basicsize = sizeof(PPObject),
     .tp_itemsize = 0,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
     .tp_new = PP_new,
     .tp_dealloc = (destructor) PP_dealloc,
+    .tp_traverse = (traverseproc) PP_traverse,
+    .tp_clear = (inquiry) PP_clear,
     .tp_members = PP_members,
     .tp_methods = PP_methods,
 };
@@ -1604,6 +1665,9 @@ PyInit__pagio(void)
         return NULL;
     }
     if (init_datetime() == -1) {
+        return NULL;
+    }
+    if (init_json() == -1) {
         return NULL;
     }
 

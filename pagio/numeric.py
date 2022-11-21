@@ -2,10 +2,11 @@
 from codecs import decode
 from decimal import Decimal
 from struct import Struct
-from typing import Tuple, Any, Generator
+from typing import Tuple, Any, Generator, Union
 
 from . import const
 from .common import ushort_struct_unpack_from, Format, ProtocolError
+from .text import default_to_pg
 
 
 def get_struct_unpacker(fmt: str) -> Any:
@@ -25,6 +26,16 @@ bin_int2_to_python = get_struct_unpacker("h")
 bin_int_to_python = get_struct_unpacker("i")
 bin_uint_to_python = get_struct_unpacker("I")
 bin_int8_to_python = get_struct_unpacker("q")
+
+
+def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
+    """ Convert a Python int to a PG int parameter """
+    if -0x10000000 <= val <= 0x7FFFFFFF:
+        return const.INT4OID, "i", val, 4, Format.BINARY
+    if -0x1000000000000000 <= val <= 0x7FFFFFFFFFFFFFFF:
+        return const.INT8OID, "q", val, 8, Format.BINARY
+    return default_to_pg(val)
+
 
 # ======== float ============================================================ #
 
@@ -91,6 +102,18 @@ def bin_numeric_to_python(buf: memoryview) -> Decimal:
 
     return Decimal((sign, digits, exp))
 
+
+def numeric_to_pg(val: Decimal) -> Tuple[int, str, float, int, Format]:
+    """ Converts a python Decimal to a PG parameter tuple """
+    if val.is_nan():
+        str_val = "NaN"
+    else:
+        str_val = str(val)
+    byte_val = str_val.encode()
+    len_val = len(byte_val)
+    return const.NUMERICOID, f"{len_val}s", byte_val, len_val, Format.TEXT
+
+
 # ======== bool ============================================================= #
 
 
@@ -110,3 +133,8 @@ def text_bool_to_python(buf: memoryview) -> bool:
     if buf == b'f':
         return False
     raise ProtocolError("Invalid value for bool")
+
+
+def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
+    """ Convert a Python bool to a PG bool parameter """
+    return const.BOOLOID, "B", val, 1, Format.BINARY

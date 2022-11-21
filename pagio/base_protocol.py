@@ -4,6 +4,7 @@ from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
 from datetime import date, datetime
+from decimal import Decimal
 import enum
 from hashlib import md5
 from itertools import repeat
@@ -12,6 +13,7 @@ import sys
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
     Type, OrderedDict as TypingOrderedDict, Iterable)
+import uuid
 
 from .pgscramp import PGScrampClient
 
@@ -30,7 +32,9 @@ from .network import (
     txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
     bin_cidr_to_python)
 from . import numeric
-from .text import txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python
+from .text import (
+    txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python, str_to_pg,
+    default_to_pg, uuid_to_pg, txt_json_to_python, bin_jsonb_to_python)
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if sys.version_info >= (3, 8):
@@ -46,7 +50,7 @@ msg_header_struct_unpack_from = Struct("!Bi").unpack_from
 int_struct_unpack_from = Struct('!i').unpack_from
 
 field_desc_struct = Struct("!IhIhih")
-field_desc_struct_size = field_desc_struct.size
+field_desc_struct_size: int = field_desc_struct.size
 field_desc_struct_unpack_from = field_desc_struct.unpack_from
 
 intint_struct = Struct('!ii')
@@ -91,32 +95,6 @@ def none_to_pg(val: None) -> Tuple[int, str, None, int, Format]:
     return 0, "", None, -1, Format.TEXT
 
 
-def str_to_pg(val: str) -> Tuple[int, str, bytes, int, Format]:
-    """ Convert a Python string to a PG text parameter """
-    bytes_val = val.encode()
-    val_len = len(bytes_val)
-    return 0, f"{val_len}s", bytes_val, val_len, Format.TEXT
-
-
-def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
-    """ Convert a Python object to a PG text parameter """
-    return str_to_pg(str(val))
-
-
-def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
-    """ Convert a Python int to a PG int parameter """
-    if -0x10000000 <= val <= 0x7FFFFFFF:
-        return const.INT4OID, "i", val, 4, Format.BINARY
-    if -0x1000000000000000 <= val <= 0x7FFFFFFFFFFFFFFF:
-        return const.INT8OID, "q", val, 8, Format.BINARY
-    return default_to_pg(val)
-
-
-def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
-    """ Convert a Python bool to a PG bool parameter """
-    return const.BOOLOID, "B", val, 1, Format.BINARY
-
-
 class _AbstractPGProtocol(ABC):
     _prepare_threshold: int
     _cache_size: int
@@ -145,7 +123,6 @@ class _AbstractPGProtocol(ABC):
         """ Notify buffer is updated with received data. """
 
     @abstractmethod
-    # pylint: disable-next=too-many-arguments
     def execute_message(
         self,
         sql: str,
@@ -199,10 +176,9 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 ('R', self.handle_auth_req),
                 ('K', self.handle_backend_key_data),
                 ('I', self.handle_empty_query_response),
-                ('n', self.handle_nodata),
                 ('G', self.handle_copy_in_response),
                 ('A', self.handle_notification_response),
-        ]}
+            ]}
         self._backend: Optional[Tuple[int, int]] = None
         self.password: Union[None, bytes] = None
         self.user: Union[None, bytes] = None
@@ -354,7 +330,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             self._close()
             self._set_exception(exc)
         elif self._ex is None:
-            # non fatal and connected, raise when ready for query arrives
+            # non fatal and connected, raise when ReadyForQuery arrives
             self._ex = exc
 
     def _handle_md5_auth_req(self, msg_buf: memoryview) -> None:
@@ -427,6 +403,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
         self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
 
     def handle_notification_response(self, msg_buf: memoryview) -> None:
+        """ Handles a notification """
         if len(msg_buf) < 6 or msg_buf[-1] != 0:
             raise ProtocolError("Invalid notification reponse")
         process_id = int4_struct_unpack_from(msg_buf)[0]
@@ -437,10 +414,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
         channel, payload = parts
         self.enqueue_notification(Notification(
             process_id=process_id, channel=channel, payload=payload))
-
-    def handle_nodata(self, msg_buf: memoryview) -> None:
-        """ Handles a nodata message """
-        check_length_equal(0, msg_buf)
 
     def handle_empty_query_response(self, msg_buf: memoryview) -> None:
         """ Handles an empty query response. """
@@ -518,6 +491,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 ('2', self.handle_bind_complete),
                 ('3', self.handle_close_complete),
                 ('T', self.handle_row_description),
+                ('n', self.handle_nodata),
                 ('D', self.handle_data_row),
                 ('C', self.handle_command_complete),
                 ('Z', self.handle_ready_for_query),
@@ -549,13 +523,17 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 self.txt_timestamptz_to_python,
                 self.bin_timestamptz_to_python,
             ),
+            const.JSONBOID: (txt_json_to_python, bin_jsonb_to_python),
+            const.JSONOID: (txt_json_to_python, txt_json_to_python),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
-            int: int_to_pg,
+            int: numeric.int_to_pg,
             str: str_to_pg,
             type(None): none_to_pg,
             float: numeric.float_to_pg,
-            bool: bool_to_pg,
+            bool: numeric.bool_to_pg,
+            uuid.UUID: uuid_to_pg,
+            Decimal: numeric.numeric_to_pg,
         }
 
     def get_buffer(self, sizehint: int) -> memoryview:
@@ -712,7 +690,6 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 result_format = Format.BINARY
         return stmt_name, prepared, result_format
 
-    # pylint: disable-next=too-many-arguments
     def execute_message(
             self,
             sql: str,

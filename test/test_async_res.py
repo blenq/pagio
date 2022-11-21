@@ -4,7 +4,10 @@ try:
 except ImportError:
     from later.unittest.backport.async_case import IsolatedAsyncioTestCase
 
-from pagio import AsyncConnection, Format, ServerError, ProtocolStatus
+from pagio import (
+    AsyncConnection, Format, ServerError, ProtocolStatus, async_connection,
+    async_protocol,
+)
 
 
 class ResultCase(IsolatedAsyncioTestCase):
@@ -120,3 +123,14 @@ class ResultCase(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self._cn.close()
+
+
+class PyResultCase(ResultCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        async_connection.AsyncPGProtocol = async_protocol.PyAsyncPGProtocol
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        async_connection.AsyncPGProtocol = async_protocol.AsyncPGProtocol
+

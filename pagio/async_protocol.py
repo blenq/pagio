@@ -5,7 +5,6 @@ from asyncio import (
     BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
     AbstractEventLoop, Queue, CancelledError,
 )
-from codecs import decode
 from inspect import isawaitable
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
 from struct import Struct
@@ -263,10 +262,12 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._transport.write(self.cancel_message(backend_key))
         self._close()
 
-    def __await__(self):
+    def __await__(self) -> Any:
+        """ Wait until ReadyForQuery is sent """
+        if self._read_fut is None:
+            raise ValueError("Can not await Protocol")
         return self._read_fut.__await__()
 
-    # pylint: disable-next=too-many-arguments
     async def _execute(
             self,
             sql: str,
@@ -282,7 +283,6 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._status = _STATUS_EXECUTING
         return ResultSet(await self._read_fut)
 
-    # pylint: disable-next=too-many-arguments
     async def execute(
             self,
             sql: str,

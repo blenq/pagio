@@ -13,6 +13,7 @@ pagio_ext = Extension(
         'pagio/extension/text.c',
         'pagio/extension/uuid.c',
         'pagio/extension/datetime.c',
+        'pagio/extension/json.c',
     ],
     depends=[
         'pagio/extension/pagio.h',
@@ -26,6 +27,7 @@ pagio_ext = Extension(
         'pagio/extension/text.h',
         'pagio/extension/uuid.h',
         'pagio/extension/datetime.h',
+        'pagio/extension/json.h',
     ],
 )
 

@@ -16,7 +16,6 @@ HAS_TCP_NODELAY = hasattr(socket, 'TCP_NODELAY')
 class Connection(BaseConnection):
     """ Synchronous connection class """
 
-    # pylint: disable-next=too-many-arguments
     def __init__(
             self,
             host: Optional[str] = None,
@@ -34,8 +33,9 @@ class Connection(BaseConnection):
             cache_size: int = 100,
     ) -> None:
         super().__init__(
-            host, port, database, user, password, tz_name, ssl_mode=ssl_mode,
-            ssl=ssl, local_addr=local_addr, server_hostname=server_hostname,
+            host, port, database, user, password, tz_name=tz_name,
+            ssl_mode=ssl_mode, ssl=ssl, local_addr=local_addr,
+            server_hostname=server_hostname,
             prepare_threshold=prepare_threshold, cache_size=cache_size,
         )
         self._protocol: PGProtocol = self._connect(self._ssl_mode)
@@ -86,7 +86,7 @@ class Connection(BaseConnection):
             self,
             sql: str,
             *parameters: Tuple[Any, ...],
-            result_format: Format = Format.TEXT,
+            result_format: Format = Format.DEFAULT,
             raw_result: bool = False,
             file_obj: Optional[SyncCopyFile] = None,
     ) -> ResultSet:
