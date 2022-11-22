@@ -103,3 +103,16 @@ convert_pg_bytea_text(PPObject *self, char *buf, int len)
     }
     return bytes;
 }
+
+int
+fill_bytes_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    // Convert a Python bytes object to a PG value.
+    // Just the raw binary value.
+    param_info->ptr = PyBytes_AS_STRING(param);
+    param_info->len = PyBytes_GET_SIZE(param);
+    *oid = BYTEAOID;
+    *p_fmt = 1;
+    return 0;
+}

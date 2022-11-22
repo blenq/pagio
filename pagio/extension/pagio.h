@@ -15,6 +15,8 @@ typedef struct _PPobject PPObject;
 
 typedef PyObject *(*res_converter)(PPObject *, char *, int);
 
+#define PARAM_NEEDS_FREE 1
+
 typedef struct {
     const char* ptr;
     union {

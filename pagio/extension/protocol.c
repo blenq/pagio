@@ -310,6 +310,7 @@ get_converters(unsigned int type_oid) {
         bytea_converters[2] = {convert_pg_bytea_text, convert_pg_binary},
         uuid_converters[2] = {convert_pg_uuid_text, convert_pg_uuid_bin},
         date_converters[2] = {convert_pg_date_text, convert_pg_date_bin},
+        time_converters[2] = {convert_pg_time_text, convert_pg_time_bin},
         timestamp_converters[2] = {
             convert_pg_timestamp_text, convert_pg_timestamp_bin},
         timestamptz_converters[2] = {
@@ -351,6 +352,8 @@ get_converters(unsigned int type_oid) {
         return uuid_converters;
     case DATEOID:
         return date_converters;
+    case TIMEOID:
+        return time_converters;
     case TIMESTAMPOID:
         return timestamp_converters;
     case TIMESTAMPTZOID:
@@ -1018,11 +1021,33 @@ fill_param_info(
     else if (PyFloat_CheckExact(param)) {
         ret = fill_float_info(param_info, &oid, &fmt, param);
     }
+    else if (Py_TYPE(param) == (PyTypeObject *)Date) {
+        ret = fill_date_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)Time) {
+        ret = fill_time_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)DateTime) {
+        ret = fill_datetime_info(param_info, &oid, &fmt, param);
+    }
     else if (Py_TYPE(param) == (PyTypeObject *)UUID) {
         ret = fill_uuid_info(param_info, &oid, &fmt, param);
     }
+    else if (PyBytes_CheckExact(param)) {
+        ret = fill_bytes_info(param_info, &oid, &fmt, param);
+    }
     else if (Py_TYPE(param) == (PyTypeObject *)Decimal) {
         ret = fill_numeric_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)IPv4Address ||
+            Py_TYPE(param) == (PyTypeObject *)IPv6Address ||
+            Py_TYPE(param) == (PyTypeObject *)IPv4Interface ||
+            Py_TYPE(param) == (PyTypeObject *)IPv6Interface) {
+        ret = fill_inet_info(param_info, &oid, &fmt, param);
+    }
+    else if (Py_TYPE(param) == (PyTypeObject *)IPv4Network ||
+            Py_TYPE(param) == (PyTypeObject *)IPv6Network) {
+        ret = fill_cidr_info(param_info, &oid, &fmt, param);
     }
     else {
         ret = fill_object_info(param_info, &oid, &fmt, param);
@@ -1041,6 +1066,9 @@ clean_param_info(ParamInfo *param_info, Py_ssize_t num_params) {
         ParamInfo *p_info = param_info + i;
         if (p_info->obj) {
             Py_DECREF(p_info->obj);
+        }
+        if (p_info->flags & PARAM_NEEDS_FREE) {
+            PyMem_Free((void *)p_info->ptr);
         }
     }
     PyMem_Free(param_info);

@@ -85,7 +85,7 @@ class Connection(BaseConnection):
     def execute(
             self,
             sql: str,
-            *parameters: Tuple[Any, ...],
+            *parameters: Any,
             result_format: Format = Format.DEFAULT,
             raw_result: bool = False,
             file_obj: Optional[SyncCopyFile] = None,

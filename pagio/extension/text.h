@@ -17,4 +17,8 @@ convert_pg_text(PPObject *self, char *buf, int len) {
     return PyUnicode_FromStringAndSize(buf, len);
 }
 
+int fill_bytes_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param);
+
+
 #endif

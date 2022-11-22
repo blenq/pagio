@@ -3,8 +3,21 @@
 #include "utils.h"
 #include <datetime.h>
 
+#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 10
+
+#define _PyDateTime_HAS_TZINFO(o)  (((_PyDateTime_BaseTZInfo *)(o))->hastzinfo)
+
+#define PyDateTime_DATE_GET_TZINFO(o) (_PyDateTime_HAS_TZINFO((o)) ? \
+    ((PyDateTime_DateTime *)(o))->tzinfo : Py_None)
+
+#endif
+
+PyObject *Date;
+PyObject *DateTime;
+PyObject *Time;
 
 // ===== date =================================================================
+
 
 PyObject *
 convert_pg_date_text(PPObject *self, char *buf, int len) {
@@ -23,6 +36,7 @@ convert_pg_date_text(PPObject *self, char *buf, int len) {
 
 
 #define POSTGRES_EPOCH_JDATE 2451545
+#define DATE_OFFSET 730120
 
 static void
 date_vals_from_int(int jd, int *year, int *month, int *day)
@@ -83,6 +97,150 @@ convert_pg_date_bin(PPObject *self, char *buf, int len) {
     }
 }
 
+static const int _days_before_month[] = {
+    0, /* unused; this vector uses 1-based indexing */
+    0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+};
+
+static int
+get_py_ordinal(PyObject *param)
+{
+    int prev_year, year, month, day, py_ordinal;
+
+    year = PyDateTime_GET_YEAR(param);
+    prev_year = year - 1;
+    month = PyDateTime_GET_MONTH(param);
+    day = PyDateTime_GET_DAY(param);
+
+    py_ordinal = (
+        prev_year * 365 + prev_year / 4 - prev_year / 100 + prev_year / 400 +
+        _days_before_month[month] + day);
+    if (month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+        py_ordinal += 1;
+    }
+    return py_ordinal;
+}
+
+int
+fill_date_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    int py_ordinal;
+
+    py_ordinal = get_py_ordinal(param);
+    *oid = DATEOID;
+    *p_fmt = 1;
+    param_info->val.int4 = htobe32(py_ordinal - DATE_OFFSET);
+    param_info->ptr = (char *)&param_info->val;
+    param_info->len = 4;
+    return 0;
+}
+
+// ===== time =================================================================
+
+PyObject *
+convert_pg_time_text(PPObject *self, char *buf, int len) {
+    unsigned int hour, minute, second, usec=0;
+    int num_read;
+
+    if (len < 8 || len == 9 || len > 15) {
+        PyErr_SetString(PyExc_ValueError, "Invalid time value");
+        return NULL;
+    }
+    num_read = sscanf(buf, "%2u:%2u:%2u", &hour, &minute, &second);
+    if (num_read != 3) {
+        PyErr_SetString(PyExc_ValueError, "Invalid time value");
+        return NULL;
+    }
+    if (hour == 24) {
+        hour = 0;
+    }
+    if (len > 8) {
+        // read microseconds
+        char *pos;
+        int mul = 100000;
+
+        if (buf[8] != '.') {
+            PyErr_SetString(PyExc_ValueError, "Invalid time value");
+            return NULL;
+        }
+        for (pos = buf + 9; mul && pos < buf + len; pos++) {
+            unsigned int udigit;
+            num_read = sscanf(pos, "%1u", &udigit);
+            if (num_read != 1) {
+                PyErr_SetString(PyExc_ValueError, "Invalid time value");
+                return NULL;
+            }
+            usec += mul * udigit;
+            mul /= 10;
+        }
+    }
+    return PyTime_FromTime(hour, minute, second, usec);
+}
+
+
+#define USECS_PER_DAY       Py_LL(86400000000)
+#define USECS_PER_HOUR      Py_LL(3600000000)
+#define USECS_PER_MINUTE    Py_LL(60000000)
+#define USECS_PER_SEC       Py_LL(1000000)
+
+
+static int
+time_vals_from_int(uint64_t tm, int *hour, int *minute, int *second, int *usec)
+{
+    uint64_t hr;
+
+    hr = tm / USECS_PER_HOUR;
+    if (tm < 0 || hr > 24) {
+        PyErr_SetString(PyExc_ValueError, "Invalid time value");
+        return -1;
+    }
+    *hour = (int)hr % 24;
+    tm -= hr * USECS_PER_HOUR;
+    *minute = (int)(tm / USECS_PER_MINUTE);
+    tm -= *minute * USECS_PER_MINUTE;
+    *second = (int)(tm / USECS_PER_SEC);
+    *usec = (int)(tm - *second * USECS_PER_SEC);
+    return 0;
+}
+
+
+PyObject *
+convert_pg_time_bin(PPObject *self, char *buf, int len)
+{
+    uint64_t val;
+    int hour, minute, second, usec;
+
+    if (len != 8) {
+        PyErr_SetString(PyExc_ValueError, "Invalid binary timestamp value.");
+        return NULL;
+    }
+    val = unpack_int8(buf);
+    if (time_vals_from_int(val, &hour, &minute, &second, &usec) == -1) {
+        return NULL;
+    }
+    return PyTime_FromTime(hour, minute, second, usec);
+}
+
+
+int
+fill_time_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    param_info->val.int8 = htobe64(
+        PyDateTime_TIME_GET_HOUR(param) * USECS_PER_HOUR +
+        PyDateTime_TIME_GET_MINUTE(param) * USECS_PER_MINUTE +
+        PyDateTime_TIME_GET_SECOND(param) * USECS_PER_SEC +
+        PyDateTime_TIME_GET_MICROSECOND(param)
+        );
+    param_info->ptr = (char *)&param_info->val;
+    param_info->len = 8;
+    *oid = TIMEOID;
+    *p_fmt = 1;
+    return 0;
+}
+
+
 // ===== datetime =============================================================
 
 PyObject *datetime_fromisoformat;
@@ -110,32 +268,6 @@ convert_pg_timestamp_text(PPObject *self, char *buf, int len) {
     memcpy(new_buf + 20, "000000", 6); // First copy zeroes
     memcpy(new_buf, buf, len);         // Copy original string
     return PyObject_CallFunction(datetime_fromisoformat, "s#", new_buf, 26);
-}
-
-#define USECS_PER_DAY       Py_LL(86400000000)
-#define USECS_PER_HOUR      Py_LL(3600000000)
-#define USECS_PER_MINUTE    Py_LL(60000000)
-#define USECS_PER_SEC       Py_LL(1000000)
-
-
-static int
-time_vals_from_int(uint64_t tm, int *hour, int *minute, int *second,
-                   int *usec)
-{
-    uint64_t hr;
-
-    hr = (int)(tm / USECS_PER_HOUR);
-    if (tm < 0 || hr > 24) {
-        PyErr_SetString(PyExc_ValueError, "Invalid time value");
-        return -1;
-    }
-    *hour = (int)hr % 24;
-    tm -= hr * USECS_PER_HOUR;
-    *minute = (int)(tm / USECS_PER_MINUTE);
-    tm -= *minute * USECS_PER_MINUTE;
-    *second = (int)(tm / USECS_PER_SEC);
-    *usec = (int)(tm - *second * USECS_PER_SEC);
-    return 0;
 }
 
 
@@ -210,7 +342,6 @@ convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
     }
     memcpy(date_str, buf, len);
     date_str[len] = '\0';
-//    fprintf(stderr, "%s\n", date_str);
     num_read = sscanf(
         date_str, "%4u-%2u-%2u %2u:%2u:%2u", &year, &month, &day, &hour,
         &minute, &second);
@@ -220,9 +351,7 @@ convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
     if (year == 0) {
         goto end;
     }
-//    fprintf(stderr, "wow\n");
     if (date_str[19] == '.') {
-//        fprintf(stderr, "Nope\n");
         int i;
         num_read = sscanf(date_str + 20, "%6u%n", &usec, &pos);
         if (num_read != 1) {
@@ -236,8 +365,6 @@ convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
     else {
         pos = 19;
     }
-//    fprintf(stderr, "wow 1\n");
-//    fprintf(stderr, "pos %d\n", pos);
     if (pos == len) {
         goto end;
     }
@@ -246,22 +373,17 @@ convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
     if (pos == len) {
         goto end;
     }
-//    fprintf(stderr, "wow 2\n");
     num_read = sscanf(
         date_str + pos, "%2u:%2u:%2u", &tz_hour, &tz_minute, &tz_second);
     if (num_read == 0) {
         goto end;
     }
-//    fprintf(stderr, "wow 3\n");
     if (tz_hour > 23 || tz_minute > 59 || tz_second > 59) {
         goto end;
     }
-//    fprintf(stderr, "%02u:%02u:%02u", tz_hour, tz_minute, tz_second);
-//    fprintf(stderr, "pos %d\n", pos + 3 * num_read - 1);
     if (pos + 3 * num_read - 1 != len) {
         goto end;
     }
-//    fprintf(stderr, "wow 4\n");
     int tz_total_secs = tz_hour * 3600 + tz_minute * 60 + tz_second;
     if (tz_sign == '-') {
         tz_total_secs *= -1;
@@ -269,17 +391,14 @@ convert_iso_timestamptz_txt(PPObject *self, char *buf, int len)
     else if (tz_sign != '+') {
         goto end;
     }
-//    fprintf(stderr, "wow 5\n");
     td = PyDelta_FromDSU(0, tz_total_secs, 0);
     if (td == NULL) {
         goto end;
     }
-//    fprintf(stderr, "wow 6\n");
     tz = PyTimeZone_FromOffset(td);
     if (tz == NULL) {
         goto end;
     }
-//    fprintf(stderr, "wow 7\n");
     dt = PyDateTimeAPI->DateTime_FromDateAndTime(
         year, month, day, hour, minute, second, usec, tz,
         PyDateTimeAPI->DateTimeType);
@@ -398,6 +517,49 @@ convert_pg_timestamptz_bin(PPObject *self, char *buf, int len)
 }
 
 
+void
+_fill_datetime_info(ParamInfo *param_info, PyObject *param)
+{
+    int py_ordinal;
+
+    py_ordinal = get_py_ordinal(param);
+    param_info->val.int8 = htobe64(
+        (py_ordinal - DATE_OFFSET) * USECS_PER_DAY +
+        PyDateTime_DATE_GET_HOUR(param) * USECS_PER_HOUR +
+        PyDateTime_DATE_GET_MINUTE(param) * USECS_PER_MINUTE +
+        PyDateTime_DATE_GET_SECOND(param) * USECS_PER_SEC +
+        PyDateTime_DATE_GET_MICROSECOND(param)
+        );
+    param_info->ptr = (char *)&param_info->val;
+    param_info->len = 8;
+}
+
+
+int
+fill_datetime_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    if (PyDateTime_DATE_GET_TZINFO(param) == Py_None) {
+        // datetime without timezone
+        _fill_datetime_info(param_info, param);
+        *oid = TIMESTAMPOID;
+    }
+    else {
+        // datetime with timezone, first convert to utc
+        PyObject *pg_date = PyObject_CallMethodObjArgs(
+            param, astimezone, PyDateTime_TimeZone_UTC, NULL);
+        if (pg_date == NULL) {
+            return -1;
+        }
+        _fill_datetime_info(param_info, pg_date);
+        Py_DECREF(pg_date);
+        *oid = TIMESTAMPTZOID;
+    }
+    *p_fmt = 1;
+    return 0;
+}
+
+
 PyObject *ZoneInfo;
 
 int
@@ -406,6 +568,13 @@ init_datetime(void) {
 
     /* necessary to call PyDate API */
     PyDateTime_IMPORT;
+
+    Date = (PyObject *)PyDateTimeAPI->DateType;
+    Py_INCREF(Date);
+    Time = (PyObject *)PyDateTimeAPI->TimeType;
+    Py_INCREF(Time);
+    DateTime = (PyObject *)PyDateTimeAPI->DateTimeType;
+    Py_INCREF(DateTime);
 
     datetime_fromisoformat = PyObject_GetAttrString(
         (PyObject *)PyDateTimeAPI->DateTimeType, "fromisoformat");

@@ -103,7 +103,7 @@ def bin_numeric_to_python(buf: memoryview) -> Decimal:
     return Decimal((sign, digits, exp))
 
 
-def numeric_to_pg(val: Decimal) -> Tuple[int, str, float, int, Format]:
+def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
     """ Converts a python Decimal to a PG parameter tuple """
     if val.is_nan():
         str_val = "NaN"

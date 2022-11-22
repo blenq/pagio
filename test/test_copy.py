@@ -221,7 +221,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
                     file_obj=file_obj)
 
             # Try again and specify encoding in statement
-            file_obj.seek(0)
+            file_obj = get_input_file("latin-1")
             res = await cn.execute(
                 "COPY input_table FROM STDIN ("
                 "   HEADER MATCH, FORMAT CSV, ENCODING LATIN1)",
@@ -243,7 +243,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
                     file_obj=file_obj, result_format=Format.BINARY)
 
             # Try again and specify encoding in statement
-            file_obj.seek(0)
+            file_obj = get_input_file("latin-1")
             res = await cn.execute(
                 "COPY input_table FROM STDIN ("
                 "   HEADER MATCH, FORMAT CSV, ENCODING LATIN1)",

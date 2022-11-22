@@ -1,6 +1,8 @@
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta, time
 from decimal import Decimal
-from ipaddress import IPv4Interface, IPv6Interface, IPv4Network, IPv6Network
+from ipaddress import (
+    IPv4Interface, IPv6Interface, IPv4Network, IPv6Network, IPv4Address,
+    IPv6Address)
 import unittest
 from uuid import UUID, uuid4
 
@@ -30,6 +32,15 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT '192.168.0.1/24'::inet", IPv4Interface("192.168.0.1/24"))
 
+    def test_ipv4_inet_param(self):
+        val = IPv4Interface("192.168.0.1")
+        self._test_val_result("SELECT $1 -- no-cache 3", val, val)
+        val = IPv4Interface("192.168.0.1/24")
+        self._test_val_result("SELECT $1 -- no-cache 4", val, val)
+        val = IPv4Address("192.168.0.10")
+        self._test_val_result(
+            "SELECT $1 -- no-cache 5", IPv4Interface("192.168.0.10/32"), val)
+
     def test_ipv6_inet_result(self):
         self._test_val_result(
             "SELECT '2001:db8:85a3:0:0:8a2e:370:7334'::inet",
@@ -38,14 +49,32 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '2001:db8:85a3:0:0:8a2e:370:7334/64'::inet",
             IPv6Interface("2001:db8:85a3:0:0:8a2e:370:7334/64"))
 
+    def test_ipv6_inet_param(self):
+        val = IPv6Interface("2001:db8:85a3:0:0:8a2e:370:7334")
+        self._test_val_result("SELECT $1 -- no-cache 6", val, val)
+        val = IPv6Interface("2001:db8:85a3:0:0:8a2e:370:7334/64")
+        self._test_val_result("SELECT $1 -- no-cache 7", val, val)
+        val = IPv6Address("2001:db8:85a3:0:0:8a2e:370:7334")
+        self._test_val_result(
+            "SELECT $1 -- no-cache 8",
+            IPv6Interface("2001:db8:85a3:0:0:8a2e:370:7334"), val)
+
     def test_ipv4_cidr_result(self):
         self._test_val_result(
             "SELECT '192.168.0.0/24'::cidr", IPv4Network("192.168.0.0/24"))
+
+    def test_ipv4_cidr_param(self):
+        val = IPv4Network('192.168.0.0/24')
+        self._test_val_result("SELECT $1 -- no-cache 9", val, val)
 
     def test_ipv6_cidr_result(self):
         self._test_val_result(
             "SELECT '2001:db8:85a3:0:0:8a2e:0:0/96'::cidr",
             IPv6Network("2001:db8:85a3:0:0:8a2e:0:0/96"))
+
+    def test_ipv6_cidr_param(self):
+        val = IPv6Network('2001:db8:85a3:0:0:8a2e:0:0/96')
+        self._test_val_result("SELECT $1 -- no-cache 10", val, val)
 
     def _assert_decimal_equals(self, expected, actual):
         if expected.is_nan() and actual.is_nan():
@@ -100,11 +129,11 @@ class ConnTypeCase(unittest.TestCase):
             "8.7654e-765",
         ]:
             val = Decimal(val_str)
-            self._test_val_result("SELECT $1", val, val)
+            self._test_val_result("SELECT $1 -- no-cache 11", val, val)
         with Connection(database="postgres") as cn:
             for val_str in ["Nan", "-NaN", "sNaN", "-sNaN"]:
                 val = Decimal(val_str)
-                res = cn.execute("SELECT $1", val)
+                res = cn.execute("SELECT $1 -- no-cache 12", val)
                 self.assertTrue(res.rows[0][0].is_nan())
 
     def test_bytea_result(self):
@@ -113,6 +142,10 @@ class ConnTypeCase(unittest.TestCase):
         self._cn.execute("SET bytea_output TO 'escape'")
         self._test_val_result("SELECT '\\x09686f695c'::bytea", b'\thoi\\')
 
+    def test_bytea_param(self):
+        val = b'\thoi\\'
+        self._test_val_result("SELECT $1 -- no-cache 11", val, val)
+
     def test_uuid_result(self):
         self._test_val_result(
             "SELECT '42d36a04-8ff1-4337-870e-51de61b19771'::uuid",
@@ -120,7 +153,7 @@ class ConnTypeCase(unittest.TestCase):
 
     def test_uuid_param(self):
         val = uuid4()
-        self._test_val_result("SELECT $1", val, val)
+        self._test_val_result("SELECT $1 -- no-cache 13", val, val)
 
     def test_date_result(self):
         self._test_val_result(
@@ -142,6 +175,20 @@ class ConnTypeCase(unittest.TestCase):
         res = self._cn.execute(
             "SELECT '2021-03-15'::date", result_format=Format.BINARY)
         self.assertEqual(date(2021, 3, 15), res[0][0])
+
+    def test_date_param(self):
+        val = date(2021, 3, 15)
+        self._test_val_result("SELECT $1 -- no-cache 14", val, val)
+        val = date(1980, 3, 15)
+        self._test_val_result("SELECT $1 -- no-cache 15", val, val)
+        val = date(1980, 1, 15)
+        self._test_val_result("SELECT $1 -- no-cache 16", val, val)
+        val = date(2000, 3, 15)
+        self._test_val_result("SELECT $1 -- no-cache 17", val, val)
+        val = date(1, 1, 1)
+        self._test_val_result("SELECT $1 -- no-cache 18", val, val)
+        val = date(9999, 12, 31)
+        self._test_val_result("SELECT $1 -- no-cache 19", val, val)
 
     def test_timestamp_result(self):
         self._test_val_result(
@@ -187,6 +234,12 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '2021-03-15 14:10:03'::timestamp",
             result_format=Format.BINARY)
         self.assertEqual(datetime(2021, 3, 15, 14, 10, 3), res[0][0])
+
+    def test_timestamp_param(self):
+        val = datetime(2021, 3, 15, 14, 10, 3)
+        self._test_val_result("SELECT $1 -- no-cache 19", val, val)
+        val = datetime(2021, 3, 15, 14, 10, 3, 234)
+        self._test_val_result("SELECT $1 -- no-cache 20", val, val)
 
     def _test_tstz_val(self, sql, val):
         res = self._cn.execute(sql)
@@ -275,6 +328,47 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '0002-03-15 14:10:08'::timestamptz",
             datetime(2, 3, 15, 14, 10, 8, tzinfo=timezone(timedelta(days=-1, seconds=65364)))
         )
+
+    def test_timestamptz_param(self):
+        self._cn.execute("SET TIMEZONE TO 'Europe/Amsterdam'")
+        val = datetime(2021, 3, 15, 14, 10, 3)
+        res = self._cn.execute(
+            "SELECT $1::timestamptz", val, result_format=Format.TEXT)
+        tz2 = timezone(timedelta(hours=1))
+        val2 = datetime(2021, 3, 15, 14, 10, 3, tzinfo=tz2)
+        db_val = res.rows[0][0]
+        self.assertEqual(val2, db_val)
+        self.assertEqual(tz2, db_val.tzinfo)
+
+
+        res = self._cn.execute(
+            "SELECT $1::timestamptz", val, result_format=Format.BINARY)
+        db_val = res.rows[0][0]
+        self.assertEqual(val2, db_val)
+        self.assertEqual(val2, db_val)
+        self.assertEqual(ZoneInfo("Europe/Amsterdam"), db_val.tzinfo)
+
+        res = self._cn.execute(
+            "SELECT $1 -- no-cache 1", val2, result_format=Format.TEXT)
+        db_val = res.rows[0][0]
+        self.assertEqual(val2, db_val)
+        self.assertEqual(tz2, db_val.tzinfo)
+
+        res = self._cn.execute(
+            "SELECT $1 -- no-cache 2", val2, result_format=Format.BINARY)
+        db_val = res.rows[0][0]
+        self.assertEqual(val2, db_val)
+        self.assertEqual(ZoneInfo("Europe/Amsterdam"), db_val.tzinfo)
+
+    def test_time_result(self):
+        self._test_val_result("SELECT '13:12'::time", time(13, 12))
+        self._test_val_result(
+            "SELECT '13:12:34.23'::time", time(13, 12, 34, 230000))
+        self._test_val_result("SELECT '24:00'::time", time(0))
+
+    def test_time_param(self):
+        val = time(13, 12)
+        self._test_val_result("SELECT $1 -- no-cache time", val, val)
 
     def test_jsonb_result(self):
         self._test_val_result(

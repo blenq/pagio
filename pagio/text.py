@@ -7,7 +7,7 @@ from typing import Iterator, Generator, Any, Tuple
 from uuid import UUID
 
 from .common import Format, ProtocolError
-from .const import UUIDOID
+from .const import UUIDOID, BYTEAOID
 
 # ======== bytea ============================================================ #
 
@@ -48,6 +48,11 @@ def txt_bytea_to_python(buf: memoryview) -> bytes:
             yield (byte_val - 48) * 64 + byte2 * 8 + byte3
 
     return bytes(get_bytes())
+
+
+def bytes_to_pg(val: bytes) -> Tuple[int, str, bytes, int, Format]:
+    val_len = len(val)
+    return BYTEAOID, f"{val_len}s", val, val_len, Format.BINARY
 
 # ======== uuid ============================================================= #
 

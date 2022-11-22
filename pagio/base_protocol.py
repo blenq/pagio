@@ -3,10 +3,11 @@
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 import enum
 from hashlib import md5
+import ipaddress
 from itertools import repeat
 from struct import Struct, unpack_from, pack
 import sys
@@ -24,17 +25,10 @@ from .common import (
     int4_struct_unpack_from, Notification,
 )
 from . import const
-from .dt import (
-    txt_date_to_python, bin_date_to_python, txt_timestamp_to_python,
-    bin_timestamp_to_python, txt_timestamptz_to_python,
-    bin_timestamptz_to_python)
-from .network import (
-    txt_inet_to_python, bin_inet_to_python, txt_cidr_to_python,
-    bin_cidr_to_python)
+from . import dt
+from . import network
 from . import numeric
-from .text import (
-    txt_bytea_to_python, txt_uuid_to_python, bin_uuid_to_python, str_to_pg,
-    default_to_pg, uuid_to_pg, txt_json_to_python, bin_jsonb_to_python)
+from . import text
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 if sys.version_info >= (3, 8):
@@ -512,28 +506,42 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             const.TEXTOID: (decode, decode),
             const.VARCHAROID: (decode, decode),
             const.BPCHAROID: (decode, decode),
-            const.BYTEAOID: (txt_bytea_to_python, bytes),
-            const.INETOID: (txt_inet_to_python, bin_inet_to_python),
-            const.CIDROID: (txt_cidr_to_python, bin_cidr_to_python),
-            const.UUIDOID: (txt_uuid_to_python, bin_uuid_to_python),
-            const.DATEOID: (self.txt_date_to_python, bin_date_to_python),
+            const.BYTEAOID: (text.txt_bytea_to_python, bytes),
+            const.INETOID: (
+                network.txt_inet_to_python, network.bin_inet_to_python),
+            const.CIDROID: (
+                network.txt_cidr_to_python, network.bin_cidr_to_python),
+            const.UUIDOID: (text.txt_uuid_to_python, text.bin_uuid_to_python),
+            const.DATEOID: (self.txt_date_to_python, dt.bin_date_to_python),
+            const.TIMEOID: (dt.txt_time_to_python, dt.bin_time_to_python),
             const.TIMESTAMPOID: (
-                self.txt_timestamp_to_python, bin_timestamp_to_python),
+                self.txt_timestamp_to_python, dt.bin_timestamp_to_python),
             const.TIMESTAMPTZOID: (
                 self.txt_timestamptz_to_python,
                 self.bin_timestamptz_to_python,
             ),
-            const.JSONBOID: (txt_json_to_python, bin_jsonb_to_python),
-            const.JSONOID: (txt_json_to_python, txt_json_to_python),
+            const.JSONBOID: (
+                text.txt_json_to_python, text.bin_jsonb_to_python),
+            const.JSONOID: (text.txt_json_to_python, text.txt_json_to_python),
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: numeric.int_to_pg,
-            str: str_to_pg,
+            str: text.str_to_pg,
             type(None): none_to_pg,
             float: numeric.float_to_pg,
             bool: numeric.bool_to_pg,
-            uuid.UUID: uuid_to_pg,
+            uuid.UUID: text.uuid_to_pg,
             Decimal: numeric.numeric_to_pg,
+            date: dt.date_to_pg,
+            time: dt.time_to_pg,
+            datetime: dt.datetime_to_pg,
+            bytes: text.bytes_to_pg,
+            ipaddress.IPv4Address: network.ip_interface_to_pg,
+            ipaddress.IPv6Address: network.ip_interface_to_pg,
+            ipaddress.IPv4Interface: network.ip_interface_to_pg,
+            ipaddress.IPv6Interface: network.ip_interface_to_pg,
+            ipaddress.IPv4Network: network.ip_network_to_pg,
+            ipaddress.IPv6Network: network.ip_network_to_pg,
         }
 
     def get_buffer(self, sizehint: int) -> memoryview:
@@ -596,7 +604,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
     def convert_param(self, param: Any) -> Tuple[int, str, Any, int, Format]:
         """ Convert a Python value into a PostgreSQL param tuple. """
-        return self.param_converters.get(type(param), default_to_pg)(param)
+        return self.param_converters.get(
+            type(param), text.default_to_pg)(param)
 
     def _close_statement_msg(self, stmt_name: bytes) -> bytes:
         name_len = len(stmt_name)
@@ -964,7 +973,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
     def txt_date_to_python(self, buf: memoryview) -> Union[str, date]:
         """ Converts PG textual date value to a Python date if possible. """
         if self._iso_dates:
-            return txt_date_to_python(buf)
+            return dt.txt_date_to_python(buf)
         return decode(buf)
 
     def txt_timestamp_to_python(self, buf: memoryview) -> Union[str, datetime]:
@@ -973,7 +982,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         """
         if self._iso_dates:
-            return txt_timestamp_to_python(buf)
+            return dt.txt_timestamp_to_python(buf)
         return decode(buf)
 
     def txt_timestamptz_to_python(
@@ -983,7 +992,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         """
         if self._iso_dates:
-            return txt_timestamptz_to_python(buf)
+            return dt.txt_timestamptz_to_python(buf)
         return decode(buf)
 
     def bin_timestamptz_to_python(
@@ -992,4 +1001,4 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         tzinfo if possible.
 
         """
-        return bin_timestamptz_to_python(buf, self._tz_info)
+        return dt.bin_timestamptz_to_python(buf, self._tz_info)

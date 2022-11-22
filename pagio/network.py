@@ -3,11 +3,12 @@
 from codecs import decode
 from ipaddress import (
     ip_interface, ip_network, IPv4Interface, IPv6Interface, IPv4Network,
-    IPv6Network)
+    IPv6Network, IPv4Address, IPv6Address)
 from struct import unpack_from
-from typing import Union, Callable, Any, cast
+from typing import Union, Callable, Any, cast, Tuple
 
-from .common import ProtocolError, check_length_equal
+from .common import ProtocolError, check_length_equal, Format
+from .const import INETOID, CIDROID
 
 
 def txt_inet_to_python(buf: memoryview) -> Union[IPv4Interface, IPv6Interface]:
@@ -55,3 +56,24 @@ def get_read_ip_bin(cidr: int) -> Callable[[memoryview], Any]:
 bin_inet_to_python = get_read_ip_bin(0)
 
 bin_cidr_to_python = get_read_ip_bin(1)
+
+
+def inet_to_pg(
+        val: Union[IPv4Address, IPv6Address, IPv4Network, IPv6Network],
+        oid: int,
+) -> Tuple[int, str, bytes, int, Format]:
+    val_bytes = str(val).encode()
+    val_len = len(val_bytes)
+    return oid, f"{val_len}s", val_bytes, val_len, Format.TEXT
+
+
+def ip_interface_to_pg(
+        val: Union[IPv4Address, IPv6Address]
+) -> Tuple[int, str, bytes, int, Format]:
+    return inet_to_pg(val, INETOID)
+
+
+def ip_network_to_pg(
+        val: Union[IPv4Network, IPv6Network]
+) -> Tuple[int, str, bytes, int, Format]:
+    return inet_to_pg(val, CIDROID)
