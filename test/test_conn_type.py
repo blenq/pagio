@@ -262,32 +262,29 @@ class ConnTypeCase(unittest.TestCase):
         self._cn.execute("SET TIMEZONE TO 'Europe/Berlin'")
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, tzinfo=timezone(timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, tzinfo=ZoneInfo("Europe/Berlin")))
         self._cn.execute("SET TIMEZONE TO 'Europe/Berlin'")
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.2'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 200000, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 200000,
+                tzinfo=ZoneInfo("Europe/Berlin")))
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.02'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 20000, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 20000,
+                tzinfo=ZoneInfo("Europe/Berlin")))
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.002'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 2000, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 2000,
+                tzinfo=ZoneInfo("Europe/Berlin")))
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.0002'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 200, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 200, tzinfo=ZoneInfo("Europe/Berlin")))
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.00002'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 20, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 20, tzinfo=ZoneInfo("Europe/Berlin")))
         self._test_tstz_val(
             "SELECT '2021-03-15 14:10:03.000002'::timestamptz", datetime(
-                2021, 3, 15, 14, 10, 3, 2, tzinfo=timezone(
-                    timedelta(hours=1))))
+                2021, 3, 15, 14, 10, 3, 2, tzinfo=ZoneInfo("Europe/Berlin")))
         self._cn.execute("SET TIMEZONE TO '-02:30'")
         self._test_tstz_val(
             "SELECT '2021-03-15 14:11:03'::timestamptz", datetime(
@@ -326,7 +323,7 @@ class ConnTypeCase(unittest.TestCase):
         self.assertEqual(res.rows[0][0], '0002-03-15 20:00:43+00 BC')
         self._test_tstz_val(
             "SELECT '0002-03-15 14:10:08'::timestamptz",
-            datetime(2, 3, 15, 14, 10, 8, tzinfo=timezone(timedelta(days=-1, seconds=65364)))
+            datetime(2, 3, 15, 14, 10, 8, tzinfo=ZoneInfo("America/Chicago"))
         )
 
     def test_timestamptz_param(self):
@@ -338,8 +335,7 @@ class ConnTypeCase(unittest.TestCase):
         val2 = datetime(2021, 3, 15, 14, 10, 3, tzinfo=tz2)
         db_val = res.rows[0][0]
         self.assertEqual(val2, db_val)
-        self.assertEqual(tz2, db_val.tzinfo)
-
+        self.assertEqual(ZoneInfo("Europe/Amsterdam"), db_val.tzinfo)
 
         res = self._cn.execute(
             "SELECT $1::timestamptz", val, result_format=Format.BINARY)
@@ -352,7 +348,7 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT $1 -- no-cache 1", val2, result_format=Format.TEXT)
         db_val = res.rows[0][0]
         self.assertEqual(val2, db_val)
-        self.assertEqual(tz2, db_val.tzinfo)
+        self.assertEqual(ZoneInfo("Europe/Amsterdam"), db_val.tzinfo)
 
         res = self._cn.execute(
             "SELECT $1 -- no-cache 2", val2, result_format=Format.BINARY)
@@ -369,6 +365,40 @@ class ConnTypeCase(unittest.TestCase):
     def test_time_param(self):
         val = time(13, 12)
         self._test_val_result("SELECT $1 -- no-cache time", val, val)
+
+    def test_timetz_result(self):
+        self._test_val_result(
+            "SELECT '13:12+01'::timetz",
+            time(13, 12, tzinfo=timezone(timedelta(hours=1))))
+        self._test_val_result(
+            "SELECT '13:12:22-02:30'::timetz",
+            time(13, 12, 22, tzinfo=timezone(
+                -1 * timedelta(hours=2, minutes=30))))
+        self._test_val_result(
+            "SELECT '13:12:22+02:30:12'::timetz",
+            time(13, 12, 22, tzinfo=timezone(
+                timedelta(hours=2, minutes=30, seconds=12))))
+        self._test_val_result(
+            "SELECT '24:00:00-02:30:12'::timetz",
+            time(0, tzinfo=timezone(
+                -1 * timedelta(hours=2, minutes=30, seconds=12))))
+
+    def test_timetz_param(self):
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=2)))
+        self._test_val_result("SELECT $1 -- no-cache timetz", val, val)
+        val = time(13, 12, tzinfo=ZoneInfo("Europe/Paris"))
+        self._test_val_result(
+            "SELECT $1 -- no-cache timetz 2", time(13, 12), val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=-3)))
+        self._test_val_result("SELECT $1 -- no-cache timetz 3", val, val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=-18)))
+        self._test_val_result(
+            "SELECT $1 -- no-cache timetz 4", "13:12:00-18:00", val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=16)))
+        self._test_val_result(
+            "SELECT $1 -- no-cache timetz 5", "13:12:00+16:00", val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=2, microseconds=10)))
+        self._test_val_result("SELECT $1 -- no-cache timetz 6", val, val)
 
     def test_jsonb_result(self):
         self._test_val_result(

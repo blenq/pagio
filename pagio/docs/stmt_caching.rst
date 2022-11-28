@@ -68,8 +68,8 @@ Things to keep in mind
 ----------------------
 
 Statement preparation needs the Extended Query protocol, which does not support
-command texts with multiple statements. Such command texts will be executed
-with the Simple Query protocol and never be prepared or cached.
+command texts with multiple statements. Multi statement command texts will be
+executed with the Simple Query protocol and will never be prepared or cached.
 
 When a statement is executed for the first time, without parameters and with
 the result format not set, pagio will use the Simple
@@ -88,16 +88,16 @@ prepared statements can also be closed explicitly using a DEALLOCATE statement.
 https://www.postgresql.org/docs/current/sql-deallocate.html
 A DISCARD ALL statement will clear all statements on the server as well.
 https://www.postgresql.org/docs/current/sql-discard.html
-
-The pagio library tries to keep track of such statements, to keep the server
-and client cache in sync,
+The pagio library tries to keep track of such deallocation statements, to keep
+the server and client cache in sync,
 but if those statements are executed from a user function or similar it will
 not notice that a statement does not exist on the server anymore. When the
 statement is executed again it will fail with an error. If the failing
 statement is not running in a transaction, then the pagio Connection will
 recognize this error and recover by just executing the statement again.
 
-Another thing to keep in mind is the possible expiration of the statement.
+Another thing to keep in mind is the possible expiration of the statement due
+to a schema change.
 A statement like "SELECT * FROM table", might have different result columns or
 types when a column is added to or removed from the table.
 PostgreSQL will actually
@@ -114,7 +114,7 @@ database. It does not mean that schema changes can not be performed while
 there are connected pagio clients present. It depends on the queries and the
 actual changes. For example, if SELECT statements never use '*' or don't run
 in a transaction, columns can be added freely.
-If errors do occur, they should be gone when statements are executed again. So
+If errors do occur, they should be gone when statements are re-executed. So
 calling code that survives an error, for example a web app, should recover
 after a few hiccups. If that is not acceptable, either disable statement
 caching by setting the prepare_threshold to 0 or restart the client

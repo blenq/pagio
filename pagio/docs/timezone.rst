@@ -66,11 +66,13 @@ When the textual result format is used, it will
 only parse values when the DateStyle parameter is set to ISO. The pagio library
 sets this on startup, but it might be overridden by executing a
 "SET DateStyle TO ..." statement. In the ISO format, the timezone is
-represented as a fixed offset, e.g. "+02:00". This is translated to a Python
-timezone with a fixed offset.
+represented as a fixed offset, e.g. "+02:00". The session timezone is used if
+it is an IANA timezone recognized by the zoneinfo module. Otherwise the fixed
+offset text is translated to a Python timezone with a fixed offset.
 
-No timezone conversion by the server takes place, when the binary result format
-is used. The UTC value is sent to the client. The pagio library will try
+When the binary result format is used, No timezone conversion by the server
+takes place.
+The UTC value is sent to the client. The pagio library will try
 to convert the timestamp to the session timezone to make the results similar
 when using either text or binary format. It will return a Python datetime value
 with tzinfo set to the session timezone if it is a IANA timezone i.e.
@@ -86,13 +88,15 @@ and when it uses binary the value will be converted to a similar ISO string.
   +--------+---------------+-----------------+---------+-------------------------------------+
   | Format | ISO DateStyle | In Python range | IANA tz | Result                              |
   +========+===============+=================+=========+=====================================+
-  | text   |     yes       |      yes        |         | datetime with fixed offset timezone |
+  | text   |     yes       |      yes        |   yes   | datetime with ZoneInfo timezone     |
+  +--------+---------------+-----------------+---------+-------------------------------------+
+  | text   |     yes       |      yes        |    no   | datetime with fixed offset timezone |
+  +--------+---------------+-----------------+---------+-------------------------------------+
+  | text   |     yes       |       no        |         | original PostgreSQL text            |
   +--------+---------------+-----------------+---------+-------------------------------------+
   | text   |      no       |                 |         | original PostgreSQL text            |
   +--------+---------------+-----------------+---------+-------------------------------------+
-  | text   |               |       no        |         | original PostgreSQL text            |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | binary |               |      yes        |   yes   | datetime with (ZoneInfo) timezone   |
+  | binary |               |      yes        |   yes   | datetime with ZoneInfo timezone     |
   +--------+---------------+-----------------+---------+-------------------------------------+
   | binary |               |      yes        |    no   | datetime with UTC timezone          |
   +--------+---------------+-----------------+---------+-------------------------------------+

@@ -514,6 +514,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             const.UUIDOID: (text.txt_uuid_to_python, text.bin_uuid_to_python),
             const.DATEOID: (self.txt_date_to_python, dt.bin_date_to_python),
             const.TIMEOID: (dt.txt_time_to_python, dt.bin_time_to_python),
+            const.TIMETZOID:
+                (dt.txt_timetz_to_python, dt.bin_timetz_to_python),
             const.TIMESTAMPOID: (
                 self.txt_timestamp_to_python, dt.bin_timestamp_to_python),
             const.TIMESTAMPTZOID: (
@@ -992,7 +994,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         """
         if self._iso_dates:
-            return dt.txt_timestamptz_to_python(buf)
+            return dt.txt_timestamptz_to_python(buf, self._tz_info)
         return decode(buf)
 
     def bin_timestamptz_to_python(

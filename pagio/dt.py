@@ -3,18 +3,20 @@ import sys
 from codecs import decode
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 import re
-from typing import Union, Tuple, Optional
+from struct import Struct
+from typing import Union, Tuple, Optional, Any
 
 from .common import ProtocolError, Format
-from .const import DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMEOID
+from .const import DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMEOID, TIMETZOID
 from .numeric import bin_int_to_python, bin_int8_to_python
+from .text import default_to_pg
 
 
 __all__ = [
     "txt_date_to_python", "bin_date_to_python", "txt_timestamp_to_python",
     "bin_timestamp_to_python", "txt_timestamptz_to_python",
     "bin_timestamptz_to_python", "txt_time_to_python", "bin_time_to_python",
-    "time_to_pg",
+    "time_to_pg", "txt_timetz_to_python", "bin_timetz_to_python",
 ]
 
 # ======== date ============================================================= #
@@ -128,15 +130,74 @@ def bin_time_to_python(buf: memoryview) -> time:
     return time(*_time_vals_from_int(value))
 
 
-def time_to_pg(val: time) -> Tuple[int, str, int, int, Format]:
-    if val.tzinfo is None:
-        oid = TIMEOID
-    else:
-        raise NotImplementedError
+timetz_struct_pack = Struct("!qi").pack
+MIN_TZ_OFFSET_SECS = -16 * 60 * 60
+MAX_TZ_OFFSET_SECS = 16 * 60 * 60
+
+
+def time_to_pg(val: time) -> Tuple[int, str, Any, int, Format]:
     pg_val = (
         val.hour * USECS_PER_HOUR + val.minute * USECS_PER_MINUTE +
         val.second * USECS_PER_SEC + val.microsecond)
-    return oid, "q", pg_val, 8, Format.BINARY
+    utc_offset = val.utcoffset()
+
+    if utc_offset is None:
+        oid = TIMEOID
+        fmt = "q"
+        val_len = 8
+    else:
+        offset_seconds = utc_offset.days * 86400 + utc_offset.seconds
+        if not (MIN_TZ_OFFSET_SECS < offset_seconds < MAX_TZ_OFFSET_SECS):
+            # PG supports offset up to +/- 16 hours, bind as text
+            return default_to_pg(val)
+        oid = TIMETZOID
+        fmt = "12s"
+        val_len = 12
+        pg_val = timetz_struct_pack(pg_val, -offset_seconds)
+    return oid, fmt, pg_val, val_len, Format.BINARY
+
+# ======== timetz =========================================================== #
+
+
+timetz_re = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?"
+    r"([-+])(\d{2})(?::(\d{2})(?::(\d{2}))?)?$")
+
+
+def txt_timetz_to_python(buf: memoryview) -> time:
+    time_str = decode(buf)
+    match = timetz_re.match(time_str)
+    if match is None:
+        raise ProtocolError("Invalid PG time value.")
+    usec = match.group(4)
+    if usec is None:
+        usec = 0
+    else:
+        usec = int(usec + "0" * (6 - len(usec)))
+    hour = int(match.group(1))
+    if hour == 24:
+        hour = 0
+    tz_timedelta = timedelta(
+        hours=int(match.group(6)), minutes=int(match.group(7) or 0),
+        seconds=int(match.group(8) or 0))
+    if match.group(5) == '-':
+        tz_timedelta *= -1
+    try:
+        return time(  # type: ignore
+            hour, *(int(g) for g in match.groups()[1:3]), usec,
+            tzinfo=timezone(tz_timedelta))
+    except ValueError:
+        raise ProtocolError("Invalid PG time value")
+
+
+timetz_struct = Struct("!qi")
+
+
+def bin_timetz_to_python(buf: memoryview) -> time:
+    time_val, tz_val = timetz_struct.unpack(buf)
+    return time(
+        *_time_vals_from_int(time_val),
+        tzinfo=timezone(timedelta(seconds=-tz_val)))
 
 # ======== datetime ========================================================= #
 
@@ -173,7 +234,8 @@ timestamptz_re = re.compile(
     re.ASCII)
 
 
-def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
+def txt_timestamptz_to_python(
+        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
     # String is in the form
@@ -190,14 +252,17 @@ def txt_timestamptz_to_python(buf: memoryview) -> Union[str, datetime]:
             usec = int(usec + "0" * (6 - len(usec)))
 
         try:
-            tz_timedelta = timedelta(
-                hours=int(match.group(9)), minutes=int(match.group(10) or 0),
-                seconds=int(match.group(11) or 0))
-            if match.group(8) == '-':
-                tz_timedelta *= -1
+            if tzinfo is None:
+                tz_delta = timedelta(
+                    hours=int(match.group(9)), minutes=int(match.group(10) or 0),
+                    seconds=int(match.group(11) or 0))
+                if match.group(8) == '-':
+                    tz_delta *= -1
+                tzinfo = timezone(tz_delta)
+
             return datetime(  # type: ignore
                 *(int(g) for g in match.groups()[:6]), usec,  # type: ignore
-                tzinfo=timezone(tz_timedelta))
+                tzinfo=tzinfo)
         except ValueError:
             pass
     return ts_str

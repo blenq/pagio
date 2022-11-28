@@ -311,6 +311,7 @@ get_converters(unsigned int type_oid) {
         uuid_converters[2] = {convert_pg_uuid_text, convert_pg_uuid_bin},
         date_converters[2] = {convert_pg_date_text, convert_pg_date_bin},
         time_converters[2] = {convert_pg_time_text, convert_pg_time_bin},
+        timetz_converters[2] = {convert_pg_timetz_txt, convert_pg_timetz_bin},
         timestamp_converters[2] = {
             convert_pg_timestamp_text, convert_pg_timestamp_bin},
         timestamptz_converters[2] = {
@@ -354,6 +355,8 @@ get_converters(unsigned int type_oid) {
         return date_converters;
     case TIMEOID:
         return time_converters;
+    case TIMETZOID:
+        return timetz_converters;
     case TIMESTAMPOID:
         return timestamp_converters;
     case TIMESTAMPTZOID:

@@ -180,7 +180,7 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         val = datetime(2021, 3, 15, 14, 10, 3)
         res = await self._cn.execute(
             "SELECT $1::timestamptz", val, result_format=Format.TEXT)
-        tz2 = timezone(timedelta(hours=1))
+        tz2 = ZoneInfo("Europe/Amsterdam")
         val2 = datetime(2021, 3, 15, 14, 10, 3, tzinfo=tz2)
         db_val = res.rows[0][0]
         self.assertEqual(val2, db_val)
@@ -212,6 +212,42 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         await self._test_val_result("SELECT '24:00'::time", time(0))
         await self._test_val_result(
             "SELECT '13:12:34.239876'::time", time(13, 12, 34, 239876))
+
+    async def test_time_param(self):
+        val = time(13, 12)
+        await self._test_val_result("SELECT $1 -- no-cache time", val, val)
+
+    async def test_timetz_result(self):
+        await self._test_val_result(
+            "SELECT '13:12+01'::timetz",
+            time(13, 12, tzinfo=timezone(timedelta(hours=1))))
+        await self._test_val_result(
+            "SELECT '13:12:22-02:30'::timetz",
+            time(13, 12, 22, tzinfo=timezone(
+                -1 * timedelta(hours=2, minutes=30))))
+        await self._test_val_result(
+            "SELECT '13:12:22+02:30:12'::timetz",
+            time(13, 12, 22, tzinfo=timezone(
+                timedelta(hours=2, minutes=30, seconds=12))))
+        await self._test_val_result(
+            "SELECT '24:00:00-02:30:12'::timetz",
+            time(0, tzinfo=timezone(
+                -1 * timedelta(hours=2, minutes=30, seconds=12))))
+
+    async def test_timetz_param(self):
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=2)))
+        await self._test_val_result("SELECT $1 -- no-cache timetz", val, val)
+        val = time(13, 12, tzinfo=ZoneInfo("Europe/Paris"))
+        await self._test_val_result(
+            "SELECT $1 -- no-cache timetz 2", time(13, 12), val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=-3)))
+        await self._test_val_result("SELECT $1 -- no-cache timetz 3", val, val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=-18)))
+        await self._test_val_result(
+            "SELECT $1 -- no-cache timetz 4", "13:12:00-18:00", val)
+        val = time(13, 12, tzinfo=timezone(timedelta(hours=16)))
+        await self._test_val_result(
+            "SELECT $1 -- no-cache timetz 5", "13:12:00+16:00", val)
 
     async def test_jsonb_result(self):
         await self._test_val_result(

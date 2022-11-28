@@ -6,6 +6,7 @@
 
 #define DATEOID 1082
 #define TIMEOID 1083
+#define TIMETZOID 1266
 #define TIMESTAMPOID 1114
 #define TIMESTAMPTZOID 1184
 
@@ -20,6 +21,8 @@ PyObject *convert_pg_date_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_date_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_time_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_time_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_timetz_txt(PPObject *self, char *buf, int len);
+PyObject *convert_pg_timetz_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamp_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamp_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamptz_text(PPObject *self, char *buf, int len);
