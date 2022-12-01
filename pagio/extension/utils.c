@@ -18,6 +18,14 @@ uint64_t unpack_uint8(char *ptr) {
 }
 
 
+void
+pack_uint2(char *ptr, uint16_t val) {
+    uint16_t nval;
+    nval = htobe16(val);
+    memcpy(ptr, &nval, 2);
+}
+
+
 int
 fill_unicode_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
@@ -34,23 +42,57 @@ fill_unicode_info(
 }
 
 
+static PyObject *oid_str;
+
 int
 fill_object_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
     PyObject *str_param;
-    int ret;
+
+    if (PyObject_HasAttr(param, oid_str)) {
+        // If the param object has an attribute "oid" use that.
+        PyObject *py_param_oid;
+        unsigned long param_oid;
+
+        py_param_oid = PyObject_GetAttr(param, oid_str);
+        if (py_param_oid == NULL) {
+            return -1;
+        }
+        param_oid = PyLong_AsUnsignedLong(py_param_oid);
+        Py_DECREF(py_param_oid);
+        if (param_oid == (unsigned long)-1 && PyErr_Occurred()) {
+            return -1;
+        }
+
+#if SIZEOF_LONG != 4    /* LP64 systems, like 64 bits linux */
+        if (param_oid > UINT32_MAX) {
+            PyErr_SetString(PyExc_ValueError, "Invalid oid value");
+            return -1;
+        }
+#endif
+        *oid = (unsigned int)param_oid;
+    }
 
     str_param = PyObject_Str(param);
     if (str_param == NULL) {
         return -1;
     }
-    ret = fill_unicode_info(param_info, oid, p_fmt, str_param);
-    if (ret == 0) {
-        param_info->obj = str_param;
-    }
-    else {
+    param_info->obj = str_param;
+    if (fill_unicode_info(param_info, oid, p_fmt, str_param) == -1) {
+        param_info->obj = NULL;
         Py_DECREF(str_param);
+        return -1;
     }
-    return ret;
+    return 0;
+}
+
+int
+init_utils(void)
+{
+    oid_str = PyUnicode_InternFromString("oid");
+    if (oid_str == NULL) {
+        return -1;
+    }
+    return 0;
 }

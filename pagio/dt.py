@@ -306,7 +306,7 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
 
 
 def bin_timestamptz_to_python(
-        buf: memoryview, tz_info: Optional[tzinfo]) -> Union[str, datetime]:
+        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
     """ Converts PG binary timestamp value to Python datetime """
     value = bin_int8_to_python(buf)
 
@@ -323,8 +323,8 @@ def bin_timestamptz_to_python(
             timestamp = datetime.combine(
                 date.fromordinal(pg_ordinal + DATE_OFFSET),
                 time(hour, minute, sec, usec), tzinfo=timezone.utc)
-            if tz_info is not None:
-                timestamp = timestamp.astimezone(tz_info)
+            if tzinfo is not None:
+                timestamp = timestamp.astimezone(tzinfo)
             return timestamp
         except (OverflowError, ValueError):
             pass

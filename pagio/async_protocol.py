@@ -1,5 +1,5 @@
 """ Asynchronous version of Protocol """
-
+import asyncio
 from asyncio import (
     BufferedProtocol, Transport, shield, Future, get_running_loop,
     BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
@@ -89,6 +89,8 @@ class _AsyncPGProtocol(_BasePGProtocol):
         if read_fut in done[0]:
             # PostgreSQL has returned a ReadyForQuery message and probably
             # an Error message before that, but it is ready anyway. Done.
+            if coro_task not in done[0]:
+                coro_task.cancel()
             return False, None
 
         if self._ex:

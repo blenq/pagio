@@ -29,6 +29,7 @@ pagio_ext = Extension(
         'pagio/extension/datetime.h',
         'pagio/extension/json.h',
     ],
+    optional=True,
 )
 
 

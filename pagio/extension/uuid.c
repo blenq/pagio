@@ -46,7 +46,13 @@ fill_uuid_info(
     if (bytes_val == NULL) {
         return -1;
     }
-    if (PyBytes_Size(bytes_val) != 16) {
+    if (!PyBytes_Check(bytes_val)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid uuid bytes value.");
+        Py_DECREF(bytes_val);
+        return -1;
+    }
+    if (PyBytes_GET_SIZE(bytes_val) != 16) {
+        PyErr_SetString(PyExc_ValueError, "Invalid uuid byte value length.");
         Py_DECREF(bytes_val);
         return -1;
     }

@@ -75,9 +75,13 @@ class ProtocolStatus(enum.IntEnum):
 class TransactionStatus(enum.Enum):
     """ Transaction status """
     UNKNOWN = 0
+    """ Unknown """
     IDLE = ord('I')
+    """ No transaction in progress """
     TRANSACTION = ord('T')
+    """ Transaction in progress """
     ERROR = ord('E')
+    """ Transaction in error state """
 
 
 _default_converters = (decode, bytes)
@@ -160,7 +164,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
     _transaction_status: int
     _status: int
     _server_parameters: Dict[str, str]
-    _tz_info: Optional[ZoneInfo]
+    _tzinfo: Optional[ZoneInfo]
 
     def __init__(self) -> None:
         self._handlers: Dict[int, Callable[[memoryview], None]] = {
@@ -200,9 +204,9 @@ class _BasePGProtocol(_AbstractPGProtocol):
         return ProtocolStatus(self._status)
 
     @property
-    def tz_info(self) -> Union[None, ZoneInfo]:
+    def tzinfo(self) -> Union[None, ZoneInfo]:
         """ Session timezone """
-        return self._tz_info
+        return self._tzinfo
 
     @property
     def backend_key(self) -> Tuple[int, int]:
@@ -333,7 +337,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Missing password")
         if self.user is None:
             raise ProtocolError("Missing user")
-        salt, = unpack_from("4s", msg_buf, 4)
+        [salt] = unpack_from("4s", msg_buf, 4)
         pw_hash = (b'md5' + md5(md5(
             self.password + self.user
         ).hexdigest().encode() + salt).hexdigest().encode())
@@ -345,7 +349,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
     def handle_auth_req(self, msg_buf: memoryview) -> None:
         """ Handles authentication messages """
-        specifier, = int_struct_unpack_from(msg_buf)
+        [specifier] = int_struct_unpack_from(msg_buf)
         if specifier == 0:
             check_length_equal(4, msg_buf)
         elif specifier == 5:
@@ -400,7 +404,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
         """ Handles a notification """
         if len(msg_buf) < 6 or msg_buf[-1] != 0:
             raise ProtocolError("Invalid notification reponse")
-        process_id = int4_struct_unpack_from(msg_buf)[0]
+        [process_id] = int4_struct_unpack_from(msg_buf)
         value = decode(msg_buf[4:-1])
         parts = value.split('\0')
         if len(parts) != 2:
@@ -475,7 +479,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._transaction_status = 0
         self._server_parameters: Dict[str, str] = {}
         self._iso_dates = False
-        self._tz_info: Optional[ZoneInfo] = None
+        self._tzinfo: Optional[ZoneInfo] = None
 
         super().__init__(*args)
         self._handlers.update({
@@ -779,9 +783,9 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             self._iso_dates = val.startswith("ISO,")
         elif name == "TimeZone":
             try:
-                self._tz_info = ZoneInfo(val)
+                self._tzinfo = ZoneInfo(val)
             except ZoneInfoNotFoundError:
-                self._tz_info = None
+                self._tzinfo = None
         self._server_parameters[name] = val
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
@@ -817,7 +821,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         buffer = bytes(msg_buf)
         res_fields = []
         converters: List[Tuple[ResConverter, ResConverter]] = []
-        num_fields, = ushort_struct_unpack_from(msg_buf)
+        [num_fields] = ushort_struct_unpack_from(msg_buf)
 
         offset = 2
         for _ in range(num_fields):
@@ -868,7 +872,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         def get_vals() -> Generator[Any, None, None]:
             offset = 2
             for converter in value_converters:
-                val_len, = int_struct_unpack_from(buf, offset)
+                [val_len] = int_struct_unpack_from(buf, offset)
                 offset += 4
                 if val_len == -1:
                     yield None
@@ -994,7 +998,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         """
         if self._iso_dates:
-            return dt.txt_timestamptz_to_python(buf, self._tz_info)
+            return dt.txt_timestamptz_to_python(buf, self._tzinfo)
         return decode(buf)
 
     def bin_timestamptz_to_python(
@@ -1003,4 +1007,4 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         tzinfo if possible.
 
         """
-        return dt.bin_timestamptz_to_python(buf, self._tz_info)
+        return dt.bin_timestamptz_to_python(buf, self._tzinfo)

@@ -5,7 +5,8 @@ import getpass
 from pathlib import Path
 import socket
 from ssl import SSLContext
-from typing import Optional, Dict, Tuple, Union
+from typing import Optional, Dict, Tuple, Union, Mapping
+from types import MappingProxyType
 import os
 
 from .base_protocol import _BasePGProtocol, TransactionStatus, ProtocolStatus
@@ -17,10 +18,17 @@ HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 class SSLMode(Enum):
     """ SSL mode of connection """
     DISABLE = auto()
+    """ SSL is disabled. """
     ALLOW = auto()
+    """ SSL connection is only tried, when it fails without. """
     PREFER = auto()
+    """ SSL is tried first, but when it fails, connection proceeds without it.
+    """
     REQUIRE = auto()
+    """ SSL connection is required and connection fails without it. """
     DEFAULT = auto()
+    """ :py:attr:`SSLMode.PREFER` for TCP connections,
+        :py:attr:`SSLMode.ALLOW` for unix sockets. """
 
 
 def _get_port(port: Optional[int]) -> int:
@@ -71,8 +79,65 @@ def _get_pwd(
 
 
 class BaseConnection:  # pylint: disable=too-many-instance-attributes
-    """ Base Connection """
+    """ Base Connection class.
 
+    Instantiating this class is not meaningful. It serves as the base for
+    both :py:class:`Connection <pagio.Connection>` and
+    :py:class:`AsyncConnection <pagio.AsyncConnection>`.
+
+    :param str host: The host name of the server. If the host name is None
+        the environment variable PGHOST will be examined. If it is still None
+        it will first look for an existing Unix socket in /var/run/postgresql
+        and /tmp if Unix sockets are available for the system. As a last
+        fallback it will use "localhost".
+
+    :param int port: The server port to connect to. If the port is None the
+        value of the environment variable PGPORT is used. If it is still None
+        it will use 5432 as the default port.
+
+    :param str database: The database name to connect to. If it is None the
+        value of the environment variable PGDATABASE is used. If that is also
+        not set it will use the username as database name.
+
+    :param user: The username for the session. If it is not provided, the
+        value of the environment variable PGUSER is used. As last fallback the
+        current OS username will be used.
+        Edge case:
+        A Pagio connection will use UTF-8 for all text to binary conversions.
+        PostgreSQL uses arbitrary binary strings for usernames, depending on
+        the actual encoding in use when the user was created. If the binary
+        string can not be decoded to UTF-8, provide the username as a
+        :external+py3:py:class:`bytes` string, to prevent conversions.
+
+    :param password: The password for the session. If it is None, the value of
+        the environment variable PGPASSWORD is used. The same edge case as
+        described for the username applies to the password. If you encounter
+        that problem, provide the password as a :external+py3:py:class:`bytes`
+        string.
+
+    :param tz_name: The timezone name to use for the session. Also see
+        :ref:`Timezones`.
+
+    :param ssl_mode: Indicates if SSL should be used and if it is required.
+
+    :param ssl: :external+py3:py:class:`SSLContext <ssl.SSLContext>` to use.
+        If it is None and the connection uses SSL it will use a default
+        non-validating SSLContext.
+
+    :param local_addr: If given, is a (local_host, local_port) tuple used to
+        bind the TCP socket locally.
+
+    :param server_hostname: The hostname that is used for SSL validation. If
+        it is None, the original host argument is used instead.
+
+    :param int prepare_threshold: The number of successful executions before a
+        statement will be prepared with a name, which makes the prepared
+        statement reusable for faster execution. Setting it to zero, will
+        disable :ref:`statement caching <Statement caching>`.
+
+    :param cache_size: The maximum size of the statement cache.
+
+    """
     _protocol: Optional[_BasePGProtocol] = None
 
     def __init__(
@@ -128,48 +193,71 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
         self._ssl_in_use = False
+        self._server_parameters = None
 
     @property
     def host(self) -> str:
-        """ Server host """
+        """ PostgreSQL server host name
+
+        This is a path to a directory if Unix sockets are used, or else a
+        network hostname.
+        """
         return self._host
 
     @property
     def port(self) -> int:
-        """ Server port """
+        """ The PostgreSQL server port """
         return self._port
 
     @property
     def path(self) -> str:
-        """ Unix socket path """
+        """ Unix socket path
+
+        If a Unix socket is used, this returns the full path to the socket, or
+        None otherwise.
+        """
         if not self._use_af_unix:
-            raise ValueError("Not a unix socket connection")
+            return None
         return str(Path(self._host) / f".s.PGSQL.{self._port}")
 
     @property
     def transaction_status(self) -> TransactionStatus:
-        """ Current transaction status """
+        """ Current transaction status of the connection. """
         if self._protocol is None:
             return TransactionStatus.UNKNOWN
         return self._protocol.transaction_status
 
     @property
     def status(self) -> ProtocolStatus:
-        """ Current protocol status """
+        """ Current protocol status of the connection. """
         if self._protocol is None:
             return ProtocolStatus.CLOSED
         return self._protocol.status
 
     @property
-    def tz_info(self) -> Optional[ZoneInfo]:
+    def tzinfo(self) -> Optional[ZoneInfo]:
         """ Session timezone """
         if self._protocol is None:
             return None
-        return self._protocol.tz_info
+        return self._protocol.tzinfo
 
     @property
-    def server_parameters(self) -> Dict[str, str]:
-        """ Dictionary of server parameters """
-        if self._protocol is None:
-            return {}
-        return self._protocol.server_parameters
+    def server_parameters(self) -> Mapping[str, str]:
+        """ Dictionary like object of server parameters.
+
+        These parameters are supplied by the server. The following keys will be
+        present: "server_version", "server_encoding", "client_encoding",
+        "application_name", "default_transaction_read_only", "in_hot_standby",
+        "is_superuser", "session_authorization", "DateStyle", "IntervalStyle",
+        "TimeZone", "integer_datetimes", "standard_conforming_strings".
+
+        "default_transaction_read_only" and "in_hot_standby" will be present
+        only for server versions starting from 14.
+
+        """
+        if self._server_parameters is None:
+            if self._protocol is None:
+                return {}
+            self._server_parameters = MappingProxyType(
+                self._protocol.server_parameters)
+        return self._server_parameters

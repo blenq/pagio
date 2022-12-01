@@ -362,47 +362,259 @@ end:
 }
 
 
-PyObject *is_nan;
+static PyObject *is_nan;
+static PyObject *is_finite;
+static PyObject *as_tuple;
+static PyObject *is_signed;
+
+
+PyObject *
+decompose_decimal(
+    PyObject *param, uint16_t *pg_sign, long long *exp, int *overflow)
+{
+    // Return tuple of digits, and set the pg_sign and the exponent along the
+    // way.
+    PyObject *dec_tuple, *py_sign, *py_exp, *py_digits = NULL;
+    int sign;
+
+    dec_tuple = PyObject_CallMethodNoArgs(param, as_tuple);
+    if (dec_tuple == NULL) {
+        return NULL;
+    }
+
+    if (!PyTuple_Check(dec_tuple) || PyTuple_GET_SIZE(dec_tuple) != 3) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "Invalid value for 'as_tuple', expected three item tuple.");
+        goto end;
+    }
+
+    py_sign = PyTuple_GET_ITEM(dec_tuple, 0);
+    sign = PyObject_IsTrue(py_sign);
+    if (sign == -1) {
+        goto end;
+    }
+    *pg_sign = sign ? NUMERIC_NEG : NUMERIC_POS;
+
+    py_exp = PyTuple_GET_ITEM(dec_tuple, 2);
+    *exp = PyLong_AsLongLongAndOverflow(py_exp, overflow);
+    if (*exp == -1 && (*overflow || PyErr_Occurred())) {
+        goto end;
+    }
+
+    py_digits = PyTuple_GET_ITEM(dec_tuple, 1);
+    if (!PyTuple_Check(py_digits)) {
+        PyErr_SetString(
+            PyExc_ValueError, "Invalid value for digits.");
+        py_digits = NULL;
+        goto end;
+    }
+    Py_INCREF(py_digits);
+end:
+    Py_DECREF(dec_tuple);
+    return py_digits;
+}
+
+
+static int
+_get_bool_from_method(PyObject *val, PyObject* method, char *err_msg)
+{
+    PyObject *bool_ret;
+    int ret;
+
+    bool_ret = PyObject_CallMethodNoArgs(val, method);
+    if (bool_ret == NULL) {
+        return -1;
+    }
+    if (!PyBool_Check(bool_ret)) {
+        PyErr_SetString(PyExc_ValueError, err_msg);
+        Py_DECREF(bool_ret);
+        return -1;
+    }
+    ret = (bool_ret == Py_True);
+    Py_DECREF(bool_ret);
+    return ret;
+}
+
 
 int
 fill_numeric_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
-    PyObject *nan;
-    static char *nan_str = "NaN";
-    int nan_true;
+    Py_ssize_t pg_weight, npg_digits;
+    uint16_t pg_sign, pg_scale;
+    int finite;
+    char *buf;
 
-    nan = PyObject_CallMethodNoArgs(param, is_nan);
-    if (nan == NULL) {
+    finite = _get_bool_from_method(
+        param, is_finite, "Invalid value for 'is_finite',");
+    if (finite == -1) {
         return -1;
     }
-    nan_true = PyObject_IsTrue(nan);
-    Py_DECREF(nan);
-    if (nan_true == -1) {
-        return -1;
-    }
-    if (nan_true) {
-        param_info->ptr = nan_str;
-        param_info->len = 3;
+
+    if (finite) {
+        // Regular numeric value
+        PyObject *py_digits;
+        Py_ssize_t ndigits, weight, q;
+        long long exp;
+        int overflow, r, i, j, pg_digit;
+
+        // Get py_digits, pg_sign and exponent
+        py_digits = decompose_decimal(param, &pg_sign, &exp, &overflow);
+        if (py_digits == NULL) {
+            if (overflow) {
+                // Exponent does not fit in long long. Not sure if this can
+                // happen. Bind as text.
+                return fill_object_info(param_info, oid, p_fmt, param);
+            }
+            return -1;
+        }
+
+        if (exp < -0x3FFF) {
+            // Out of Postgres range. Bind as text.
+            Py_DECREF(py_digits);
+            return fill_object_info(param_info, oid, p_fmt, param);
+        }
+        // Postgres scale can not be negative
+        pg_scale = exp < 0 ? -exp : 0;
+
+        ndigits = PyTuple_GET_SIZE(py_digits);
+        // Calculate pg_weigth
+        // A PostgreSQL numeric pg_digit is a number from 0 to 9999, and
+        // represents 4 decimal digits.
+        // "ndigits + exp", i.e. the number of decimal digits plus the
+        // exponent is the 10 based exponent of the first decimal digit.
+        // pg_weight is 10000 based exponent of first pg_digit minus one
+        if (exp > PY_SSIZE_T_MAX - ndigits) {
+            // safe check: if ndigits + exp > PY_SSIZE_T_MAX
+            Py_DECREF(py_digits);
+            return fill_object_info(param_info, oid, p_fmt, param);
+        }
+        weight = ndigits + exp;
+        q = weight / 4;
+        r = (int)(weight % 4);
+        if (r < 0) {
+            /* correct for negative values */
+            r += 4;
+            q--;
+        }
+        pg_weight = q + (r > 0) - 1;
+        if (pg_weight < INT16_MIN || pg_weight > INT16_MAX) {
+            // Out of Postgres range. Bind as text.
+            Py_DECREF(py_digits);
+            return fill_object_info(param_info, oid, p_fmt, param);
+        }
+
+        // Calculate number of pg_digits.
+        // The pg_digits are aligned around the decimal point.
+        // For example the value 12345.67 should be encoded as the three
+        // pg_digits: 0001 2345 6700
+        npg_digits = ndigits / 4 + (r > 0) + (r < ndigits % 4);
+        if (npg_digits > 0xFFFF) {
+            // Out of Postgres range. Bind as text.
+            Py_DECREF(py_digits);
+            return fill_object_info(param_info, oid, p_fmt, param);
+        }
+        // Allocate memory for binary value
+        param_info->len = 8 + npg_digits * 2;
+        param_info->ptr = PyMem_Malloc(param_info->len);
+        if (param_info->ptr == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        param_info->flags = PARAM_NEEDS_FREE;
+
+        // Set up counter for first digit, when it is not aligned on a
+        // 4 digit boundary.
+        i = r ? 4 - r : 0;
+
+        // Fill pg_digit array
+        pg_digit = 0;
+        buf = (char *)param_info->ptr + 8;
+        for (j = 0; j < ndigits; j++) {
+            PyObject *py_digit;
+            long digit;
+
+            pg_digit *= 10;
+            py_digit = PyTuple_GET_ITEM(py_digits, j);
+            digit = PyLong_AsLong(py_digit);
+            if (digit == -1 && PyErr_Occurred()) {
+                Py_DECREF(py_digits);
+                return -1;
+            }
+            if (digit < 0 || digit > 9) {
+                PyErr_SetString(
+                    PyExc_ValueError, "Invalid value for digit.");
+                Py_DECREF(py_digits);
+                return -1;
+            }
+            pg_digit += digit;
+            i += 1;
+            if (i == 4) {
+                write_uint2(&buf, (uint16_t) pg_digit);
+                pg_digit = 0;
+                i = 0;
+            }
+        }
+        if (i) {
+            // Halfway last pg_digit. The last decimal digit is not
+            // aligned on a 4 digit boundary
+            for (; i < 4; i++) {
+                pg_digit *= 10;
+            }
+            write_uint2(&buf, (uint16_t)pg_digit);
+        }
+        Py_DECREF(py_digits);
     }
     else {
-        PyObject *val_str;
-        Py_ssize_t size;
+        // Special numbers. [-][s]NaN or (-|+)Infinite
+        int nan;
 
-        val_str = PyObject_Str(param);
-        if (val_str == NULL) {
+        pg_weight = 0;
+        pg_scale = 0;
+        npg_digits = 0;
+
+        // Data fits in standard buf, no extra allocation required
+        param_info->ptr = (const char *)param_info->val.buf;
+        param_info->len = 8;
+
+        nan = _get_bool_from_method(
+            param, is_nan, "Invalid value for 'is_nan',");
+        if (nan == -1) {
             return -1;
         }
-        param_info->ptr = PyUnicode_AsUTF8AndSize(val_str, &size);
-        if (size > INT32_MAX) {
-            Py_DECREF(val_str);
-            PyErr_SetString(PyExc_ValueError, "String parameter too long");
-            return -1;
+        if (nan) {
+            // Any of NaN, -NaN, sNaN, -sNaN
+            pg_sign = NUMERIC_NAN;
         }
-        param_info->len = (int) size;
-        param_info->obj = val_str;
+        else {
+            // Not NaN, must be infinite
+            int signed_;
+
+            signed_ = _get_bool_from_method(
+                param, is_signed, "Invalid value for 'is_signed'.");
+            if (signed_ == -1) {
+                return -1;
+            }
+            if (signed_) {
+                // Negative infinity
+                pg_sign = NUMERIC_NINF;
+            }
+            else {
+                // Positive infinity
+                pg_sign = NUMERIC_PINF;
+            }
+        }
     }
+
+    // Write value header
+    buf = (char *)param_info->ptr;
+    write_uint2(&buf, (uint16_t) npg_digits);
+    write_int2(&buf, (int16_t) pg_weight);
+    write_uint2(&buf, pg_sign);
+    write_uint2(&buf, pg_scale);
     *oid = NUMERICOID;
+    *p_fmt = 1;
     return 0;
 }
 
@@ -425,6 +637,18 @@ init_numeric(void)
     Py_DECREF(decimal_module);
     is_nan = PyUnicode_InternFromString("is_nan");
     if (is_nan == NULL) {
+        return -1;
+    }
+    is_finite = PyUnicode_InternFromString("is_finite");
+    if (is_finite == NULL) {
+        return -1;
+    }
+    as_tuple = PyUnicode_InternFromString("as_tuple");
+    if (as_tuple == NULL) {
+        return -1;
+    }
+    is_signed = PyUnicode_InternFromString("is_signed");
+    if (is_signed == NULL) {
         return -1;
     }
     return 0;

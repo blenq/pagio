@@ -25,6 +25,7 @@ typedef struct {
         int int4;
         long long int8;
         double float8;
+        char buf[8];
     } val;
     int len;
     int flags;

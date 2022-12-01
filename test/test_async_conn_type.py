@@ -10,7 +10,8 @@ try:
 except ImportError:
     from later.unittest.backport.async_case import IsolatedAsyncioTestCase
 
-from pagio import AsyncConnection, async_connection, async_protocol, Format
+from pagio import (
+    AsyncConnection, async_connection, async_protocol, Format, PGJson)
 from pagio.zoneinfo import ZoneInfo
 
 
@@ -258,6 +259,10 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         await self._test_val_result(
             "SELECT '{\"hello\": \"world\"}'::json",
             {"hello": "world"})
+
+    async def test_jsonb_param(self):
+        val = {"key_1": "value", "key_2": 13, "key_3": None}
+        await self._test_val_result("SELECT $1", val, PGJson(val))
 
 
 class PyConnTypeCase(ConnTypeCase):

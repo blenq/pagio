@@ -9,3 +9,4 @@ from .common import (
 from .const import *
 from .sync_connection import Connection
 from .sync_protocol import QueueEmpty
+from .text import PGJson

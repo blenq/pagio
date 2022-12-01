@@ -38,10 +38,9 @@ class ConnCase(unittest.TestCase):
         cn = Connection(database="postgres")
         res = cn.execute("SET TIMEZONE TO 'Europe/Paris'")
         self.assertEqual(res.command_tag, "SET")
-        self.assertEqual(cn.tz_info.key, 'Europe/Paris')
-        with self.assertRaises(ServerError) as ex_con:
+        self.assertEqual(cn.tzinfo.key, 'Europe/Paris')
+        with self.assertRaises(ServerError):
             cn.execute("SET TIMEZONE TO 'Europe/Pariss'")
-            print(ex_con)
         self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
         cn.close()
 

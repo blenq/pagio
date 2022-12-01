@@ -40,7 +40,7 @@ def get_read_ip_bin(cidr: int) -> Callable[[memoryview], Any]:
             if size != 4:
                 raise ProtocolError("Invalid IPv4 value.")
             check_length_equal(8, buf)
-            addr_data = unpack_from("!I", buf, 4)[0]
+            [addr_data] = unpack_from("!I", buf, 4)
         elif family == PGSQL_AF_INET6:
             if size != 16:
                 raise ProtocolError("Invalid IPv6 value.")

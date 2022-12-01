@@ -15,13 +15,6 @@
 #define _STATUS_EXECUTING 6
 
 
-static void pack_uint2(char *ptr, uint16_t val) {
-    uint16_t nval;
-    nval = htobe16(val);
-    memcpy(ptr, &nval, 2);
-}
-
-
 static inline void pack_int2(char *ptr, int16_t val) {
     pack_uint2(ptr, (uint16_t) val);
 }
@@ -1092,13 +1085,6 @@ write_int4(char **buf, int val) {
 
 
 static void
-write_int2(char **buf, short val) {
-    pack_int2(*buf, val);
-    *buf += 2;
-}
-
-
-static void
 write_string(char **buf, const char *val, int val_len) {
     memcpy(*buf, val, val_len);
     *buf += val_len;
@@ -1237,6 +1223,22 @@ lookup_cache(
                 // reuse it
                 *prepared = 1;
                 *index = PagioST_INDEX(self->cache_item);
+
+                if (PagioST_RES_FIELDS(self->cache_item)) {
+                    self->res_rows = PyList_New(0);
+                    if (self->res_rows == NULL) {
+                        return -1;
+                    }
+                    self->res_fields = PagioST_RES_FIELDS(self->cache_item);
+                    Py_INCREF(self->res_fields);
+                    self->res_converters = PagioST_RES_CONVERTERS(
+                        self->cache_item);
+                }
+                else {
+                    self->res_rows = NULL;
+                    self->res_fields = NULL;
+                    self->res_converters = NULL;
+                }
             }
         }
         else if (PagioST_NUM_EXECUTED(self->cache_item) == self->prepare_threshold) {
@@ -1249,6 +1251,7 @@ lookup_cache(
 error:
     Py_DECREF(self->cache_key);
     Py_CLEAR(self->cache_item);
+    self->cache_key_hash = -1;
     return -1;
 }
 
@@ -1351,7 +1354,7 @@ get_bind_message(
 {
     int bind_length, i;
     char *buf, stmt_name[11] = {0};
-    size_t stmt_name_len;
+    size_t stmt_name_len = 0;
     PyObject *bind_msg;
 
     if (stmt_index) {
@@ -1360,6 +1363,7 @@ get_bind_message(
                 PyExc_ValueError, "Error during string formatting.");
             return NULL;
         }
+        stmt_name_len = 10;
     }
     // Bind:
     //      identifier 'B' (1)
@@ -1376,7 +1380,6 @@ get_bind_message(
     //      result_format (2)
 
     // calculate length
-    stmt_name_len = strlen(stmt_name);
     bind_length = 14;
     if (safe_add(&bind_length, stmt_name_len) == -1) {
         return NULL;
@@ -1533,21 +1536,6 @@ _PPexecute_message(
     if (message == NULL) {
         goto error;
     }
-
-    if (prepared) {
-        PyObject *res_rows = NULL;
-        if (PagioST_RES_FIELDS(self->cache_item)) {
-            res_rows = PyList_New(0);
-            if (res_rows == NULL) {
-                goto error;
-            }
-        }
-        self->res_rows = res_rows;
-        self->res_fields = PagioST_RES_FIELDS(self->cache_item) ;
-        Py_XINCREF(self->res_fields);
-        self->res_converters = PagioST_RES_CONVERTERS(self->cache_item);
-        Py_XINCREF(self->res_fields);
-    }
     for (int i = 0; i < num_parts; i++) {
         PyTuple_SET_ITEM(message, i, msg_parts[i]);
     }
@@ -1639,7 +1627,7 @@ static PyMemberDef PP_members[] = {
     {"_server_parameters", T_OBJECT_EX, offsetof(PPObject, server_parameters),
      READONLY, "server parameters"
     },
-    {"_tz_info", T_OBJECT, offsetof(PPObject, zone_info), READONLY,
+    {"_tzinfo", T_OBJECT, offsetof(PPObject, zone_info), READONLY,
      "timezone info"
     },
     {"file_obj", T_OBJECT_EX, offsetof(PPObject, file_obj), READONLY,
@@ -1699,6 +1687,9 @@ PyInit__pagio(void)
         return NULL;
     }
     if (init_json() == -1) {
+        return NULL;
+    }
+    if (init_utils() == -1) {
         return NULL;
     }
 

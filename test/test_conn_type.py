@@ -126,7 +126,7 @@ class ConnTypeCase(unittest.TestCase):
     def test_numeric_param(self):
         for val_str in [
             "12.34", "Infinity", "inf", "-infinity", "-inf", "1.234e123",
-            "8.7654e-765",
+            "8.7654e-765", "12345.67", "123.4567", "1234.567",
         ]:
             val = Decimal(val_str)
             self._test_val_result("SELECT $1 -- no-cache 11", val, val)
@@ -253,7 +253,7 @@ class ConnTypeCase(unittest.TestCase):
         res = self._cn.execute(sql, result_format=Format.BINARY)
         res_val = res[0][0]
         self.assertEqual(val, res_val)
-        if self._cn.tz_info is not None:
+        if self._cn.tzinfo is not None:
             self.assertEqual(
                 val.tzinfo.utcoffset(val.replace(tzinfo=None)),
                 res_val.tzinfo.utcoffset(res_val.replace(tzinfo=None)))

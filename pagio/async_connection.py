@@ -12,8 +12,22 @@ from .common import ResultSet, ServerError, Format, CopyFile, Notification
 
 
 class AsyncConnection(BaseConnection):
-    """ Asynchronous connection class """
+    """ Asynchronous connection class
 
+    After instantiating it must be awaited to actually connect to the
+    PostgreSQL server. For example::
+
+        import asyncio
+        from pagio import AsyncConnection
+
+        async def main():
+            cn = await AsyncConnection(database="test")
+            ...
+
+        asyncio.run(main())
+
+
+    """
     _protocol: AsyncPGProtocol
 
     def __init__(

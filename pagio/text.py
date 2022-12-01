@@ -2,12 +2,12 @@
 
 from binascii import a2b_hex
 from codecs import decode
-from json import loads
+from json import loads, dumps
 from typing import Iterator, Generator, Any, Tuple
 from uuid import UUID
 
 from .common import Format, ProtocolError
-from .const import UUIDOID, BYTEAOID
+from .const import UUIDOID, BYTEAOID, JSONBOID
 
 # ======== bytea ============================================================ #
 
@@ -73,16 +73,17 @@ def uuid_to_pg(val: UUID) -> Tuple[int, str, bytes, int, Format]:
 # ======== text ============================================================= #
 
 
-def str_to_pg(val: str) -> Tuple[int, str, bytes, int, Format]:
+def str_to_pg(val: str, oid=0) -> Tuple[int, str, bytes, int, Format]:
     """ Convert a Python string to a PG text parameter """
     bytes_val = val.encode()
     val_len = len(bytes_val)
-    return 0, f"{val_len}s", bytes_val, val_len, Format.TEXT
+    return oid, f"{val_len}s", bytes_val, val_len, Format.TEXT
 
 
 def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
     """ Convert a Python object to a PG text parameter """
-    return str_to_pg(str(val))
+    oid = getattr(val, "oid", 0)
+    return str_to_pg(str(val), oid)
 
 # ======== jsonb ============================================================ #
 
@@ -95,3 +96,14 @@ def bin_jsonb_to_python(buf: memoryview) -> Any:
     if buf[0] != 1:
         raise ProtocolError("Invalid jsonb version")
     return loads(decode(buf[1:]))
+
+
+class PGJson:
+
+    oid = JSONBOID
+
+    def __init__(self, val):
+        self._val = dumps(val)
+
+    def __str__(self):
+        return self._val

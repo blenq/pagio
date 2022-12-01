@@ -28,7 +28,7 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_not_awaited_closed(self):
         cn = AsyncConnection(database="postgres")
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
-        self.assertEqual(cn.tz_info, None)
+        self.assertEqual(cn.tzinfo, None)
 
     async def test_wrong_db(self):
         cn = AsyncConnection(database="postgress")
@@ -47,7 +47,7 @@ class ConnCase(IsolatedAsyncioTestCase):
         cn = await AsyncConnection(database="postgres")
         res = await cn.execute("SET TIMEZONE TO 'Europe/Paris'")
         self.assertEqual(res.command_tag, "SET")
-        self.assertEqual(cn.tz_info.key, 'Europe/Paris')
+        self.assertEqual(cn.tzinfo.key, 'Europe/Paris')
         with self.assertRaises(ServerError):
             await cn.execute("SET TIMEZONE TO 'Europe/Pariss'")
         self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
