@@ -1,8 +1,11 @@
+.. _Statement caching:
+
 Statement caching
 =================
 
 First of all, statement caching can misbehave with external connection pools.
-If you encounter such problems, set the prepare_threshold to 0, to disable
+If you encounter such problems, set the
+:py:attr:`prepare_threshold <pagio.base_connection.BaseConnection>` to 0, to disable
 statement caching.
 
 PostgreSQL supports the use of prepared statements. A prepared statements can
@@ -13,17 +16,19 @@ connection, it is good practice to use long living database connections.
 
 There are
 two versions of prepared statements. The first one is a statement that is
-defined using the PREPARE syntax.
-See https://www.postgresql.org/docs/current/sql-prepare.html
+defined using the `PREPARE syntax
+<https://www.postgresql.org/docs/current/sql-prepare.html>`_.
 
-The second version is a protocol level prepared statement.
-https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY
-This is implemented for example by the PQprepare function in libpq:
-https://www.postgresql.org/docs/15/libpq-exec.html#id-1.7.3.10.3.7.1.1.1.2
+The second version is a `protocol level prepared statement
+<https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY>`_.
+This is implemented for example by the `PQprepare function
+<https://www.postgresql.org/docs/15/libpq-exec.html#id-1.7.3.10.3.7.1.1.1.2>`_
+in libpq.
 
 Except for the creation method, these prepared statements are the same.
-A view exists to inspect all prepared statements for the current session.
-https://www.postgresql.org/docs/current/view-pg-prepared-statements.html
+A `view
+<https://www.postgresql.org/docs/current/view-pg-prepared-statements.html>`_
+exists to inspect all prepared statements for the current session.
 
 The pagio library also implements protocol level statement preparation. Not
 explicitly, like libpq, but transparently when a threshold is reached for the
@@ -31,7 +36,7 @@ number of executions of a particular statement. The prepared statement is
 used on subsequent requests.
 This speeds up the process for two reasons:
 
-- There is less protocol traffic and interpretation necessary for the client.
+- There is less protocol traffic and processing necessary for the client.
   It doesn't request nor receive metadata (like number of columns, and data
   types).
 - PostgreSQL does not need to parse the statement.
@@ -84,16 +89,18 @@ If you are writing a custom converter, whenever that is actually possible, you
 must implement therefore both a text converter and a binary converter.
 
 Besides automatic closure on cache expunge or error,
-prepared statements can also be closed explicitly using a DEALLOCATE statement.
-https://www.postgresql.org/docs/current/sql-deallocate.html
-A DISCARD ALL statement will clear all statements on the server as well.
-https://www.postgresql.org/docs/current/sql-discard.html
+prepared statements can also be closed explicitly using a `DEALLOCATE
+<https://www.postgresql.org/docs/current/sql-deallocate.html>`_ statement.
+A `DISCARD ALL
+<https://www.postgresql.org/docs/current/sql-discard.html>`_
+statement will clear all statements on the server as well.
 The pagio library tries to keep track of such deallocation statements, to keep
 the server and client cache in sync,
 but if those statements are executed from a user function or similar it will
 not notice that a statement does not exist on the server anymore. When the
 statement is executed again it will fail with an error. If the failing
-statement is not running in a transaction, then the pagio Connection will
+statement is not running in a transaction, then the
+:py:class:`Pagio Connection <pagio.base_connection.BaseConnection>` will
 recognize this error and recover by just executing the statement again.
 
 Another thing to keep in mind is the possible expiration of the statement due

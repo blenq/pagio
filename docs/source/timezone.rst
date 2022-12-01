@@ -1,7 +1,10 @@
+.. _Timezones:
+
 Timezones
 =========
 
-PostgreSQL sessions have a related timezone. It can be set at startup when
+PostgreSQL sessions have a related timezone. A default value is set by the
+server, but it can be set by the client at startup when
 making a connection or by executing the "SET TIMEZONE TO ..." statement. This
 timezone is used for interpreting timestamptz input without timezone
 information, like naive datetime parameters or literals without a timezone
@@ -67,7 +70,10 @@ only parse values when the DateStyle parameter is set to ISO. The pagio library
 sets this on startup, but it might be overridden by executing a
 "SET DateStyle TO ..." statement. In the ISO format, the timezone is
 represented as a fixed offset, e.g. "+02:00". The session timezone is used if
-it is an IANA timezone recognized by the zoneinfo module. Otherwise the fixed
+it is an IANA timezone recognized by the Python
+:external+py3:py:mod:`zoneinfo`
+module or for python versions below 3.9 by the
+:external+bptz:py:mod:`backports.zoneinfo` package. Otherwise the fixed
 offset text is translated to a Python timezone with a fixed offset.
 
 When the binary result format is used, No timezone conversion by the server
@@ -83,36 +89,26 @@ When a PostgreSQL timestamptz is outside the Python datetime range, a string
 will be returned. In case of the textual format, that is the original string,
 and when it uses binary the value will be converted to a similar ISO string.
 
-.. table:: Conversions
+.. table:: Timestamptz conversions
 
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | Format | ISO DateStyle | In Python range | IANA tz | Result                              |
-  +========+===============+=================+=========+=====================================+
-  | text   |     yes       |      yes        |   yes   | datetime with ZoneInfo timezone     |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | text   |     yes       |      yes        |    no   | datetime with fixed offset timezone |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | text   |     yes       |       no        |         | original PostgreSQL text            |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | text   |      no       |                 |         | original PostgreSQL text            |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | binary |               |      yes        |   yes   | datetime with ZoneInfo timezone     |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | binary |               |      yes        |    no   | datetime with UTC timezone          |
-  +--------+---------------+-----------------+---------+-------------------------------------+
-  | binary |               |       no        |         | pagio generated ISO format text     |
-  +--------+---------------+-----------------+---------+-------------------------------------+
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | Format | ISO DateStyle | In Python range   | IANA tz | Result                              |
+  +========+===============+===================+=========+=====================================+
+  | text   |     yes       |    yes            |   yes   | datetime with ZoneInfo timezone     |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | text   |     yes       |      yes          |    no   | datetime with fixed offset timezone |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | text   |     yes       |       no          |         | original PostgreSQL text            |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | text   |      no       |                   |         | original PostgreSQL text            |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | binary |               |      yes          |   yes   | datetime with ZoneInfo timezone     |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | binary |               |      yes          |    no   | datetime with UTC timezone          |
+  +--------+---------------+-------------------+---------+-------------------------------------+
+  | binary |               |       no          |         | pagio generated ISO format text     |
+  +--------+---------------+-------------------+---------+-------------------------------------+
 
-
-A pagio connection is using statement caching by default, which can cause the
-result format to change, it is possible for a query to return a slightly
-modified version of a datetime after multiple executions.
-For example a query might return a datetime "2022-01-01 12:00:00" with tzinfo
-set to "+01:00" the first time, while later on it will return that same
-datetime "2022-01-01 12:00:00", but now with tzinfo set to "Europe/Amsterdam".
-Note that these dates are actually equal, have the same UTC offset, can be
-compared with each other and look the same when converted to string. But beware
-of subtle consequences when relying on a certain timezone.
 
 Recommended practice
 --------------------

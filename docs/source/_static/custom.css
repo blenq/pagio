@@ -1,0 +1,10 @@
+.sig-param::before {
+    content: "\0a\09";
+    white-space: pre;
+}
+
+.sig-param+.sig-paren::before {
+    content: ",\0a";
+    white-space: pre;
+}
+
