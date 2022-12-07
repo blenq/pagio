@@ -6,7 +6,9 @@ from types import TracebackType
 from typing import Optional, Any, Type, Tuple
 
 from .base_connection import BaseConnection, SSLMode
-from .common import ResultSet, ServerError, Format, SyncCopyFile
+from .base_protocol import TransactionStatus
+from .common import (
+    ResultSet, ServerError, Format, SyncCopyFile, InterfaceError)
 from .sync_protocol import PGProtocol, NotificationQueue
 
 

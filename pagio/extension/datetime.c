@@ -1,6 +1,7 @@
 #include "datetime.h"
 #include "protocol.h"
 #include "utils.h"
+#include "array.h"
 #include <datetime.h>
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 10
@@ -369,6 +370,144 @@ convert_pg_timestamptz_text(PPObject *self, char *buf, int len)
 }
 
 
+PyObject *
+convert_pg_interval_text(PPObject *self, char *buf, int len)
+{
+    PyObject *interval, *item;
+    char *pos, *end;
+    int years = 0, months = 0, days=0, hours = 0, minutes = 0, seconds = 0,
+        usecs = 0;
+    int val = 0, sign = 1, tp=0, multi=0;
+
+    pos = buf;
+    end = buf + len;
+    while (pos < end) {
+        int digit;
+
+        switch (pos[0]) {
+        case '-':
+            sign = -1;
+            break;
+        case '+':
+        case ' ':
+        case '@':
+            break;
+        case '0': case '1': case '2': case '3': case '4':
+        case '5': case '6': case '7': case '8': case '9':
+            digit = pos[0] - '0';
+            if (multi) {
+                // microseconds
+                val += digit * multi;
+                multi /= 10;
+            }
+            else {
+                val = val * 10 + digit;
+            }
+            break;
+        case 'y':
+            years = sign * val;
+            val = 0;
+            sign = 1;
+            pos = memchr(pos, ' ', end - pos);
+            if (pos == NULL) {
+                pos = end;
+            }
+            continue;
+        case 'm':
+            pos += 1;
+            if (pos == end) {
+                PyErr_SetString(PyExc_ValueError, "Invalid interval.");
+                return NULL;
+            }
+            if (pos[0] == 'o') {
+                months = sign * val;
+            }
+            else {
+                minutes = sign * val;
+            }
+            val = 0;
+            sign = 1;
+            pos = memchr(pos, ' ', end - pos);
+            if (pos == NULL) {
+                pos = end;
+            }
+            continue;
+        case 'd':
+            days = sign * val;
+            val = 0;
+            sign = 1;
+            pos = memchr(pos, ' ', end - pos);
+            if (pos == NULL) {
+                pos = end;
+            }
+            continue;
+        case ':':
+            if (tp == 0) {
+                hours = sign * val;
+            }
+            else {
+                minutes = sign * val;
+            }
+            tp += 1;
+            val = 0;
+            break;
+        case '.':
+            seconds = sign * val;
+            multi = 100000;
+            tp = 3;
+            val = 0;
+            break;
+        default:
+            PyErr_SetString(PyExc_ValueError, "Invalid interval.");
+            return NULL;
+        }
+        pos += 1;
+    }
+    if (val) {
+        // parse leftover number
+        switch (tp) {
+        case 1:
+            minutes = sign * val;
+            break;
+        case 2:
+            seconds = sign * val;
+            break;
+        case 3:
+            usecs = sign * val;
+            break;
+        }
+    }
+    interval = PyTuple_New(2);
+    if (interval == NULL) {
+        return NULL;
+    }
+    item = PyLong_FromLong(years * 12 + months);
+    if (item == NULL) {
+        goto error;
+    }
+    PyTuple_SET_ITEM(interval, 0, item);
+    item = PyDelta_FromDSU(
+        days, hours * 3600 + minutes * 60 + seconds, usecs);
+    if (item == NULL) {
+        goto error;
+    }
+    PyTuple_SET_ITEM(interval, 1, item);
+    return interval;
+
+error:
+    Py_DECREF(interval);
+    return NULL;
+}
+
+
+PyObject *
+convert_pg_intervalarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_interval_text);
+}
+
+
 // ===== binary extractors ====================================================
 //
 // Functions to extract datetime components from binary values
@@ -641,10 +780,58 @@ convert_pg_timestamp_bin(PPObject *self, char *buf, int len) {
 
 
 PyObject *
-convert_pg_timestamptz_bin(PPObject *self, char *buf, int len) {
+convert_pg_timestamptz_bin(PPObject *self, char *buf, int len)
+{
     return _convert_pg_timestamp_bin(self, buf, len, 1);
 }
 
+
+PyObject *
+convert_pg_interval_bin(PPObject *self, char *buf, int len)
+{
+    PyObject *interval, *item;
+    int64_t time_val;
+    int32_t months, days;
+    int seconds, microseconds;
+
+    if (len != 16) {
+        PyErr_SetString(PyExc_ValueError, "Invalid binary interval value.");
+        return NULL;
+    }
+    time_val = unpack_int8(buf);
+    days = unpack_int4(buf + 8);
+    months = unpack_int4(buf + 12);
+
+    seconds = (int)(time_val / 1000000);
+    microseconds = (int)(time_val % 1000000);
+
+    interval = PyTuple_New(2);
+    if (interval == NULL) {
+        return NULL;
+    }
+    item = PyLong_FromLong(months);
+    if (item == NULL) {
+        goto error;
+    }
+    PyTuple_SET_ITEM(interval, 0, item);
+    item = PyDelta_FromDSU(days, seconds, microseconds);
+    if (item == NULL) {
+        goto error;
+    }
+    PyTuple_SET_ITEM(interval, 1, item);
+    return interval;
+error:
+    Py_DECREF(interval);
+    return NULL;
+}
+
+
+PyObject *
+convert_pg_intervalarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, INTERVALOID, convert_pg_interval_bin);
+}
 
 // ===== Parameter converters =================================================
 //

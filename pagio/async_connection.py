@@ -3,7 +3,7 @@
 import asyncio
 from ssl import SSLContext
 from types import TracebackType
-from typing import Optional, Any, Generator, Type, Tuple
+from typing import Optional, Any, Generator, Type
 
 from .async_protocol import AsyncPGProtocol
 from .base_connection import BaseConnection, SSLMode

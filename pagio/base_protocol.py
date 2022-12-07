@@ -3,7 +3,7 @@
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import enum
 from hashlib import md5
@@ -15,14 +15,16 @@ from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
     Type, OrderedDict as TypingOrderedDict, Iterable)
 import uuid
+import warnings
 
 from .pgscramp import PGScrampClient
 
+from .array import ArrayConverter, BinArrayConverter
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct_unpack_from, Format, StatementDoesNotExist, CopyFile,
-    int4_struct_unpack_from, Notification,
+    ushort_struct, Format, StatementDoesNotExist, CopyFile,
+    Notification, ResConverter, error_classes, ServerWarning, ServerNotice,
 )
 from . import const
 from . import dt
@@ -36,20 +38,16 @@ if sys.version_info >= (3, 8):
 else:
     from typing_extensions import TypedDict
 
+warnings.filterwarnings("ignore", category=ServerNotice)
+
 STANDARD_BUF_SIZE = 0x4000
 
 
-msg_header_struct_unpack_from = Struct("!Bi").unpack_from
-
-int_struct_unpack_from = Struct('!i').unpack_from
-
+msg_header_struct = Struct("!Bi")
+int_struct = Struct('!i')
 field_desc_struct = Struct("!IhIhih")
-field_desc_struct_size: int = field_desc_struct.size
-field_desc_struct_unpack_from = field_desc_struct.unpack_from
-
 intint_struct = Struct('!ii')
-
-single_byte_struct_unpack = Struct('!B').unpack
+single_byte_struct = Struct('!B')
 
 
 _STATUS_CLOSED = 0
@@ -99,6 +97,7 @@ class _AbstractPGProtocol(ABC):
     _extended_query: bool
     _ex: Optional[Exception]
     file_obj: Optional[CopyFile]
+    _custom_res_converters: Dict
 
     @abstractmethod
     def _set_result(self, result: Any) -> None:
@@ -176,12 +175,31 @@ class _BasePGProtocol(_AbstractPGProtocol):
                 ('I', self.handle_empty_query_response),
                 ('G', self.handle_copy_in_response),
                 ('A', self.handle_notification_response),
+                ('N', self.handle_notice_response),
             ]}
         self._backend: Optional[Tuple[int, int]] = None
         self.password: Union[None, bytes] = None
         self.user: Union[None, bytes] = None
         self.scram_client: Optional[PGScrampClient] = None
         self._ssl_in_use = False
+
+    def register_res_converter(
+            self,
+            type_oid: int,
+            txt_conv,
+            res_conv,
+            array_oid: int,
+            delim: str
+    ) -> None:
+        self._custom_res_converters[type_oid] = (txt_conv, res_conv)
+        if array_oid:
+            self._custom_res_converters[array_oid] = (
+                ArrayConverter(delim, txt_conv).to_python,
+                BinArrayConverter(type_oid, res_conv).to_python,
+            )
+
+    def custom_res_conv(self, buf: memoryview, oid: int, fmt: Format) -> Any:
+        return self._custom_res_converters[oid][fmt](buf)
 
     @property
     def ssl_in_use(self) -> bool:
@@ -285,8 +303,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             # pylint: disable-next=raise-missing-from
             raise ProtocolError(f"Missing key '{key}' in Error Response.")
 
-    def handle_error(self, buf: memoryview) -> None:
-        """ Interprets and sets a server error. """
+    def _error_args(self, buf: memoryview) -> List[Any]:
         # format: "({error_field_code:char}{error_field_value}\0)+\0"
         if buf[-2:] != b'\0\0':
             raise ProtocolError("Invalid Error Response")
@@ -313,6 +330,12 @@ class _BasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Missing code in Error Response")
         if ex_args[2] is None:
             raise ProtocolError("Missing message in Error Response")
+        return ex_args
+
+    def handle_error(self, buf: memoryview) -> None:
+        """ Interprets and sets a server error. """
+
+        ex_args = self._error_args(buf)
 
         if ex_args[16] == "RevalidateCachedQuery":
             # recognize this particular error, to easily handle retry
@@ -321,7 +344,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             # recognize this particular error, to easily handle retry
             ex_class = StatementDoesNotExist
         else:
-            ex_class = ServerError
+            ex_class = error_classes.get(ex_args[1][:2], ServerError)
         exc = ex_class(*ex_args)
 
         if ex_args[0] is Severity.FATAL or ex_args[0] is Severity.PANIC:
@@ -330,6 +353,14 @@ class _BasePGProtocol(_AbstractPGProtocol):
         elif self._ex is None:
             # non fatal and connected, raise when ReadyForQuery arrives
             self._ex = exc
+
+    def handle_notice_response(self, buf: memoryview) -> None:
+        ex_args = self._error_args(buf)
+        if ex_args[0] is Severity.NOTICE:
+            ex_class = ServerNotice
+        else:
+            ex_class = ServerWarning
+        warnings.warn(ex_class(*ex_args))
 
     def _handle_md5_auth_req(self, msg_buf: memoryview) -> None:
         check_length_equal(8, msg_buf)
@@ -349,7 +380,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
     def handle_auth_req(self, msg_buf: memoryview) -> None:
         """ Handles authentication messages """
-        [specifier] = int_struct_unpack_from(msg_buf)
+        [specifier] = int_struct.unpack_from(msg_buf)
         if specifier == 0:
             check_length_equal(4, msg_buf)
         elif specifier == 5:
@@ -404,7 +435,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
         """ Handles a notification """
         if len(msg_buf) < 6 or msg_buf[-1] != 0:
             raise ProtocolError("Invalid notification reponse")
-        [process_id] = int4_struct_unpack_from(msg_buf)
+        [process_id] = int_struct.unpack_from(msg_buf)
         value = decode(msg_buf[4:-1])
         parts = value.split('\0')
         if len(parts) != 2:
@@ -419,7 +450,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
 
 ParamConverter = Callable[[Any], Tuple[int, str, Any, int, Format]]
-ResConverter = Callable[[memoryview], Any]
 CacheKey = Union[str, Tuple[str, Tuple[int]]]
 
 
@@ -430,6 +460,92 @@ class Statement(TypedDict):
     res_fields: Optional[Tuple[FieldInfo, ...]]
     res_converters: Optional[List[Tuple[ResConverter, ResConverter]]]
     name: bytes
+
+
+value_converters = {
+    const.INT2OID: (int, numeric.bin_int2_to_python),
+    const.INT2ARRAYOID: (
+        ArrayConverter(",", int).to_python,
+        BinArrayConverter(
+            const.INT2OID, numeric.bin_int2_to_python).to_python,
+    ),
+    const.INT4OID: (int, numeric.bin_int_to_python),
+    const.INT4ARRAYOID: (
+        ArrayConverter(",", int).to_python,
+        BinArrayConverter(
+            const.INT4OID, numeric.bin_int_to_python).to_python,
+    ),
+    const.INT8OID: (int, numeric.bin_int8_to_python),
+    const.INT8ARRAYOID: (
+        ArrayConverter(",", int).to_python,
+        BinArrayConverter(
+            const.INT8OID, numeric.bin_int8_to_python).to_python,
+    ),
+    const.OIDOID: (int, numeric.bin_uint_to_python),
+    const.FLOAT4OID: (float, numeric.bin_float4_to_python),
+    const.FLOAT4ARRAYOID: (
+        ArrayConverter(",", float).to_python,
+        BinArrayConverter(
+            const.FLOAT4OID, numeric.bin_float4_to_python).to_python,
+    ),
+    const.FLOAT8OID: (float, numeric.bin_float8_to_python),
+    const.FLOAT8ARRAYOID: (
+        ArrayConverter(",", float).to_python,
+        BinArrayConverter(
+            const.FLOAT8OID, numeric.bin_float8_to_python).to_python,
+    ),
+    const.BOOLOID: (
+        numeric.text_bool_to_python, numeric.bin_bool_to_python),
+    const.BOOLARRAYOID: (
+        ArrayConverter(",", numeric.text_bool_to_python).to_python,
+        BinArrayConverter(
+            const.BOOLOID, numeric.bin_bool_to_python).to_python,
+    ),
+    const.NUMERICOID: (
+        numeric.txt_numeric_to_python, numeric.bin_numeric_to_python),
+    const.NAMEOID: (decode, decode),
+    const.NAMEARRAYOID: (
+        ArrayConverter(",", decode).to_python,
+        BinArrayConverter(const.NAMEOID, decode).to_python,
+    ),
+    const.CHAROID: (decode, decode),
+    const.CHARARRAYOID: (
+        ArrayConverter(",", decode).to_python,
+        BinArrayConverter(const.CHAROID, decode).to_python,
+    ),
+    const.TEXTOID: (decode, decode),
+    const.TEXTARRAYOID: (
+        ArrayConverter(",", decode).to_python,
+        BinArrayConverter(const.TEXTOID, decode).to_python,
+    ),
+    const.VARCHAROID: (decode, decode),
+    const.VARCHARARRAYOID: (
+        ArrayConverter(",", decode).to_python,
+        BinArrayConverter(const.VARCHAROID, decode).to_python,
+    ),
+    const.BPCHAROID: (decode, decode),
+    const.BPCHARARRAYOID: (
+        ArrayConverter(",", decode).to_python,
+        BinArrayConverter(const.BPCHAROID, decode).to_python,
+    ),
+    const.BYTEAOID: (text.txt_bytea_to_python, bytes),
+    const.INETOID: (
+        network.txt_inet_to_python, network.bin_inet_to_python),
+    const.CIDROID: (
+        network.txt_cidr_to_python, network.bin_cidr_to_python),
+    const.UUIDOID: (text.txt_uuid_to_python, text.bin_uuid_to_python),
+    const.TIMEOID: (dt.txt_time_to_python, dt.bin_time_to_python),
+    const.TIMETZOID:
+        (dt.txt_timetz_to_python, dt.bin_timetz_to_python),
+    const.JSONBOID: (
+        text.txt_json_to_python, text.bin_jsonb_to_python),
+    const.JSONBARRAYOID: (
+        ArrayConverter(",", text.txt_json_to_python).to_python,
+        BinArrayConverter(const.JSONBOID, text.bin_jsonb_to_python).to_python,
+    ),
+    const.JSONOID: (text.txt_json_to_python, text.txt_json_to_python),
+    const.XMLOID: (decode, decode),
+}
 
 
 # pylint: disable-next=too-many-instance-attributes
@@ -495,40 +611,21 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 ('Z', self.handle_ready_for_query),
             ]})
         self.value_converters: Dict[int, Tuple[ResConverter, ResConverter]] = {
-            const.INT2OID: (int, numeric.bin_int2_to_python),
-            const.INT4OID: (int, numeric.bin_int_to_python),
-            const.INT8OID: (int, numeric.bin_int8_to_python),
-            const.FLOAT4OID: (float, numeric.bin_float4_to_python),
-            const.FLOAT8OID: (float, numeric.bin_float8_to_python),
-            const.BOOLOID: (
-                numeric.text_bool_to_python, numeric.bin_bool_to_python),
-            const.NUMERICOID: (
-                numeric.txt_numeric_to_python, numeric.bin_numeric_to_python),
-            const.NAMEOID: (decode, decode),
-            const.OIDOID: (int, numeric.bin_uint_to_python),
-            const.CHAROID: (decode, decode),
-            const.TEXTOID: (decode, decode),
-            const.VARCHAROID: (decode, decode),
-            const.BPCHAROID: (decode, decode),
-            const.BYTEAOID: (text.txt_bytea_to_python, bytes),
-            const.INETOID: (
-                network.txt_inet_to_python, network.bin_inet_to_python),
-            const.CIDROID: (
-                network.txt_cidr_to_python, network.bin_cidr_to_python),
-            const.UUIDOID: (text.txt_uuid_to_python, text.bin_uuid_to_python),
             const.DATEOID: (self.txt_date_to_python, dt.bin_date_to_python),
-            const.TIMEOID: (dt.txt_time_to_python, dt.bin_time_to_python),
-            const.TIMETZOID:
-                (dt.txt_timetz_to_python, dt.bin_timetz_to_python),
             const.TIMESTAMPOID: (
                 self.txt_timestamp_to_python, dt.bin_timestamp_to_python),
             const.TIMESTAMPTZOID: (
                 self.txt_timestamptz_to_python,
                 self.bin_timestamptz_to_python,
             ),
-            const.JSONBOID: (
-                text.txt_json_to_python, text.bin_jsonb_to_python),
-            const.JSONOID: (text.txt_json_to_python, text.txt_json_to_python),
+            const.INTERVALOID: (
+                self.txt_interval_to_python, dt.bin_interval_to_python),
+            const.INTERVALARRAYOID: (
+                ArrayConverter(",", self.txt_interval_to_python).to_python,
+                BinArrayConverter(
+                    const.INTERVALOID, dt.bin_interval_to_python).to_python,
+            ),
+            **value_converters,
         }
         self.param_converters: Dict[Type[Any], ParamConverter] = {
             int: numeric.int_to_pg,
@@ -549,6 +646,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             ipaddress.IPv4Network: network.ip_network_to_pg,
             ipaddress.IPv6Network: network.ip_network_to_pg,
         }
+        self._custom_res_converters = {}
+        self._interval_style = None
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """ Gets a buffer to receive data into. """
@@ -569,7 +668,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             # read in two stages, first header, then content
             if self._identifier is None:
                 # read header
-                self._identifier, msg_len = msg_header_struct_unpack_from(
+                self._identifier, msg_len = msg_header_struct.unpack_from(
                     self._standard_buf, msg_start)
 
                 # msg_len includes msg_len itself, so subtract 4
@@ -786,6 +885,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 self._tzinfo = ZoneInfo(val)
             except ZoneInfoNotFoundError:
                 self._tzinfo = None
+        elif name == "IntervalStyle":
+            self._interval_style = val
         self._server_parameters[name] = val
 
     def handle_parse_complete(self, msg_buf: memoryview) -> None:
@@ -821,7 +922,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         buffer = bytes(msg_buf)
         res_fields = []
         converters: List[Tuple[ResConverter, ResConverter]] = []
-        [num_fields] = ushort_struct_unpack_from(msg_buf)
+        [num_fields] = ushort_struct.unpack_from(msg_buf)
 
         offset = 2
         for _ in range(num_fields):
@@ -833,13 +934,16 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             field_name = decode(msg_buf[offset:zero_idx])
             offset = zero_idx + 1
             table_oid, col_num, type_oid, type_size, type_mod, _format = (
-                field_desc_struct_unpack_from(msg_buf, offset))
+                field_desc_struct.unpack_from(msg_buf, offset))
             res_fields.append(FieldInfo(
                 field_name, table_oid, col_num, type_oid, type_size, type_mod,
                 _format))
-            converters.append(self.value_converters.get(
-                type_oid, _default_converters))
-            offset += field_desc_struct_size
+            convs = self._custom_res_converters.get(type_oid)
+            if convs is None:
+                convs = self.value_converters.get(
+                    type_oid, _default_converters)
+            converters.append(convs)
+            offset += field_desc_struct.size
         if offset != len(msg_buf):
             raise ProtocolError("Additional data after row description")
         self.res_fields = (*res_fields,)
@@ -856,7 +960,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Unexpected data row.")
 
         num_converters = len(self.res_converters)
-        if ushort_struct_unpack_from(buf)[0] != num_converters:
+        if ushort_struct.unpack_from(buf)[0] != num_converters:
             raise ProtocolError("Invalid number of row values")
 
         value_converters: Iterable[Callable[[memoryview], Any]]
@@ -872,7 +976,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         def get_vals() -> Generator[Any, None, None]:
             offset = 2
             for converter in value_converters:
-                [val_len] = int_struct_unpack_from(buf, offset)
+                [val_len] = int_struct.unpack_from(buf, offset)
                 offset += 4
                 if val_len == -1:
                     yield None
@@ -963,7 +1067,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
     def handle_ready_for_query(self, msg_buf: memoryview) -> None:
         """ Handles a Ready for Query message. """
-        self._transaction_status = single_byte_struct_unpack(msg_buf)[0]
+        self._transaction_status = single_byte_struct.unpack(msg_buf)[0]
         self._status = _STATUS_READY_FOR_QUERY
 
         if self._prepare_threshold:
@@ -1008,3 +1112,11 @@ class PyBasePGProtocol(_AbstractPGProtocol):
 
         """
         return dt.bin_timestamptz_to_python(buf, self._tzinfo)
+
+    def txt_interval_to_python(self, buf: memoryview) -> Union[str, timedelta]:
+        """ Converts PG textual interval value to a Python tuple containing
+        months and timedelta.
+        """
+        if self._interval_style == "postgres":
+            return dt.txt_interval_to_python(buf)
+        return decode(buf)

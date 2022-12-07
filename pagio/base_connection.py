@@ -3,9 +3,10 @@
 from enum import Enum, auto
 import getpass
 from pathlib import Path
+import re
 import socket
 from ssl import SSLContext
-from typing import Optional, Dict, Tuple, Union, Mapping
+from typing import Optional, Tuple, Union, Mapping
 from types import MappingProxyType
 import os
 
@@ -193,7 +194,7 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         self._prepare_threshold = prepare_threshold
         self._cache_size = cache_size
         self._ssl_in_use = False
-        self._server_parameters = None
+        self._server_parameters: Optional[Mapping[str, str]] = None
 
     @property
     def host(self) -> str:
@@ -213,11 +214,10 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
     def path(self) -> str:
         """ Unix socket path
 
-        If a Unix socket is used, this returns the full path to the socket, or
-        None otherwise.
+        If a Unix socket is used, this returns the full path to the socket.
         """
         if not self._use_af_unix:
-            return None
+            raise ValueError("Unix sockets not in use.")
         return str(Path(self._host) / f".s.PGSQL.{self._port}")
 
     @property
@@ -261,3 +261,21 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
             self._server_parameters = MappingProxyType(
                 self._protocol.server_parameters)
         return self._server_parameters
+
+    @property
+    def server_version(self):
+        if self._protocol is None:
+            raise ValueError("Connection not established")
+        version_str = self._protocol.server_parameters["server_version"]
+        m = re.match(r"(\d+)\.(\d+)", version_str)
+        return int(m.group(1)) * 10000 + int(m.group(2))
+
+    def register_res_converter(
+            self, type_oid: int,
+            txt_conv,
+            res_conv,
+            array_oid: int = 0,
+            delim: str = ",",
+    ) -> None:
+        self._protocol.register_res_converter(
+            type_oid, txt_conv, res_conv, array_oid, delim)

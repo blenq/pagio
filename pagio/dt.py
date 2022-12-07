@@ -1,7 +1,8 @@
 """ Date/time type conversion functions """
-import sys
+import struct
 from codecs import decode
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import (
+    date, datetime, time, timedelta, timezone, tzinfo as dt_tzinfo)
 import re
 from struct import Struct
 from typing import Union, Tuple, Optional, Any
@@ -81,6 +82,7 @@ def bin_date_to_python(buf: memoryview) -> Union[str, date]:
 
 
 def date_to_pg(val: date) -> Tuple[int, str, int, int, Format]:
+    """ Converts Python date to PG parameter """
     return DATEOID, "i", val.toordinal() - DATE_OFFSET, 4, Format.BINARY
 
 # ======== time ============================================================= #
@@ -89,8 +91,7 @@ def date_to_pg(val: date) -> Tuple[int, str, int, int, Format]:
 time_re = re.compile(r"(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$")
 
 
-def txt_time_to_python(buf: memoryview) -> time:
-    time_str = decode(buf)
+def time_vals_from_txt(time_str: str) -> Tuple[int, int, int, int]:
     match = time_re.match(time_str)
     if match is None:
         raise ProtocolError("Invalid PG time value.")
@@ -102,11 +103,17 @@ def txt_time_to_python(buf: memoryview) -> time:
     hour = int(match.group(1))
     if hour == 24:
         hour = 0
+    return hour, int(match.group(2)), int(match.group(3)), usec
+
+
+def txt_time_to_python(buf: memoryview) -> time:
+    """ Converts PG textual time value to Python time """
+    time_str = decode(buf)
+    hour, minute, second, usec = time_vals_from_txt(time_str)
     try:
-        return time(  # type: ignore
-            hour, *(int(g) for g in match.groups()[1:3]), usec)  # type:ignore
-    except ValueError:
-        raise ProtocolError("Invalid PG time value")
+        return time(hour, minute, second, usec)
+    except ValueError as ex:
+        raise ProtocolError("Invalid PG time value") from ex
 
 
 USECS_PER_SEC = 1000000
@@ -126,6 +133,8 @@ def _time_vals_from_int(time_val: int) -> Tuple[int, int, int, int]:
 
 
 def bin_time_to_python(buf: memoryview) -> time:
+    """ Converts PG binary time value to Python time """
+
     value = bin_int8_to_python(buf)
     return time(*_time_vals_from_int(value))
 
@@ -136,7 +145,9 @@ MAX_TZ_OFFSET_SECS = 16 * 60 * 60
 
 
 def time_to_pg(val: time) -> Tuple[int, str, Any, int, Format]:
-    pg_val = (
+    """ Converts Python time value to PG time parameter """
+
+    pg_val: Union[int, bytes] = (
         val.hour * USECS_PER_HOUR + val.minute * USECS_PER_MINUTE +
         val.second * USECS_PER_SEC + val.microsecond)
     utc_offset = val.utcoffset()
@@ -147,7 +158,7 @@ def time_to_pg(val: time) -> Tuple[int, str, Any, int, Format]:
         val_len = 8
     else:
         offset_seconds = utc_offset.days * 86400 + utc_offset.seconds
-        if not (MIN_TZ_OFFSET_SECS < offset_seconds < MAX_TZ_OFFSET_SECS):
+        if not MIN_TZ_OFFSET_SECS < offset_seconds < MAX_TZ_OFFSET_SECS:
             # PG supports offset up to +/- 16 hours, bind as text
             return default_to_pg(val)
         oid = TIMETZOID
@@ -165,6 +176,8 @@ timetz_re = re.compile(
 
 
 def txt_timetz_to_python(buf: memoryview) -> time:
+    """ Converts PG textual timetz value to Python time with timezone """
+
     time_str = decode(buf)
     match = timetz_re.match(time_str)
     if match is None:
@@ -184,16 +197,17 @@ def txt_timetz_to_python(buf: memoryview) -> time:
         tz_timedelta *= -1
     try:
         return time(  # type: ignore
-            hour, *(int(g) for g in match.groups()[1:3]), usec,
+            hour, *(int(g) for g in match.groups()[1:3]), usec,  # type: ignore
             tzinfo=timezone(tz_timedelta))
-    except ValueError:
-        raise ProtocolError("Invalid PG time value")
+    except ValueError as ex:
+        raise ProtocolError("Invalid PG time value") from ex
 
 
 timetz_struct = Struct("!qi")
 
 
 def bin_timetz_to_python(buf: memoryview) -> time:
+    """ Converts PG binary timetz value to Python time with timezone """
     time_val, tz_val = timetz_struct.unpack(buf)
     return time(
         *_time_vals_from_int(time_val),
@@ -235,7 +249,7 @@ timestamptz_re = re.compile(
 
 
 def txt_timestamptz_to_python(
-        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
+        buf: memoryview, tzinfo: Optional[dt_tzinfo]) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
     # String is in the form
@@ -306,7 +320,7 @@ def bin_timestamp_to_python(buf: memoryview) -> Union[str, datetime]:
 
 
 def bin_timestamptz_to_python(
-        buf: memoryview, tzinfo: Optional[tzinfo]) -> Union[str, datetime]:
+        buf: memoryview, tzinfo: Optional[dt_tzinfo]) -> Union[str, datetime]:
     """ Converts PG binary timestamp value to Python datetime """
     value = bin_int8_to_python(buf)
 
@@ -350,6 +364,8 @@ def bin_timestamptz_to_python(
 
 
 def datetime_to_pg(val: datetime) -> Tuple[int, str, int, int, Format]:
+    """ Converts Python datetime to PG timestamp(tz) parameter """
+
     if val.tzinfo is None:
         oid = TIMESTAMPOID
     else:
@@ -360,3 +376,43 @@ def datetime_to_pg(val: datetime) -> Tuple[int, str, int, int, Format]:
         val.hour * USECS_PER_HOUR + val.minute * USECS_PER_MINUTE +
         val.second * USECS_PER_SEC + val.microsecond)
     return oid, "q", pg_val, 8, Format.BINARY
+
+# ======== interval ========================================================= #
+
+
+def txt_interval_to_python(buf: memoryview) -> Tuple[int, timedelta]:
+    str_val = decode(buf)
+    parts = str_val.split(" ")
+    td_sign = 1
+    if len(parts) % 2:
+        time_str = parts[-1]
+        if time_str.startswith("-"):
+            td_sign = -1
+            time_str = time_str[1:]
+        elif time_str.startswith("+"):
+            time_str = time_str[1:]
+        hour, minute, second, usec = time_vals_from_txt(time_str)
+        hour *= td_sign
+        minute *= td_sign
+        second *= td_sign
+        usec *= td_sign
+    else:
+        hour = minute = second = usec = 0
+    year = month = day = 0
+    for num_str, unit in zip(parts[::2], parts[1::2]):
+        if unit.startswith("y"):
+            year = int(num_str)
+        elif unit.startswith("mo"):
+            month = int(num_str)
+        elif unit.startswith("d"):
+            day = int(num_str)
+    return year * 12 + month, timedelta(
+        day, hours=hour, minutes=minute, seconds=second, microseconds=usec)
+
+
+interval_struct = Struct("!qii")
+
+
+def bin_interval_to_python(buf: memoryview):
+    time_val, days, months = interval_struct.unpack(buf)
+    return months, timedelta(days, microseconds=time_val)

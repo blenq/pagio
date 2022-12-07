@@ -35,6 +35,7 @@ typedef struct _PPobject {
     PyObject *res_fields;               // result set
     PyObject *result;                   // result set
     PyObject *file_obj;                 // result set
+    PyObject *custom_res_converters;    // result set
     res_converter **res_converters;     // result set
 
 } PPObject;

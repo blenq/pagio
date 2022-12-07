@@ -1,5 +1,6 @@
 #include "numeric.h"
 #include "utils.h"
+#include "array.h"
 
 // ================ float ================================================== //
 
@@ -23,6 +24,13 @@ convert_pg_float_text(PPObject *self, char *buf, int len) {
 		return NULL;
 	}
 	return PyFloat_FromDouble(val);
+}
+
+
+PyObject *
+convert_pg_floatarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_float_text);
 }
 
 
@@ -57,9 +65,25 @@ convert_pg_float4_bin(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_float4array_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, FLOAT4OID, convert_pg_float4_bin);
+}
+
+
+PyObject *
 convert_pg_float8_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_float_bin(self, buf, len, 8, PyFloat_Unpack8);
+}
+
+
+PyObject *
+convert_pg_float8array_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, FLOAT8OID, convert_pg_float8_bin);
 }
 
 
@@ -105,6 +129,13 @@ convert_pg_int_text(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_intarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_int_text);
+}
+
+
+PyObject *
 convert_pg_int2_bin(PPObject *self, char *buf, int len) {
     if (len != 2) {
         PyErr_SetString(PyExc_ValueError, "Invalid int2 value");
@@ -115,12 +146,26 @@ convert_pg_int2_bin(PPObject *self, char *buf, int len) {
 
 
 PyObject *
+convert_pg_int2array_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, INT2OID, convert_pg_int2_bin);
+}
+
+
+PyObject *
 convert_pg_int4_bin(PPObject *self, char *buf, int len) {
     if (len != 4) {
         PyErr_SetString(PyExc_ValueError, "Invalid int4 value");
         return NULL;
     }
     return PyLong_FromLong(unpack_int4(buf));
+}
+
+
+PyObject *
+convert_pg_int4array_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, INT4OID, convert_pg_int4_bin);
 }
 
 
@@ -141,6 +186,13 @@ convert_pg_int8_bin(PPObject *self, char *buf, int len) {
         return NULL;
     }
     return PyLong_FromLongLong(unpack_int8(buf));
+}
+
+
+PyObject *
+convert_pg_int8array_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, INT8OID, convert_pg_int8_bin);
 }
 
 
@@ -236,9 +288,23 @@ convert_pg_bool_text(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_boolarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_bool_text);
+}
+
+
+PyObject *
 convert_pg_bool_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_bool(self, buf, len, 1, 0);
+}
+
+
+PyObject *
+convert_pg_boolarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, BOOLOID, convert_pg_bool_bin);
 }
 
 
@@ -377,7 +443,7 @@ decompose_decimal(
     PyObject *dec_tuple, *py_sign, *py_exp, *py_digits = NULL;
     int sign;
 
-    dec_tuple = PyObject_CallMethodNoArgs(param, as_tuple);
+    dec_tuple = PyObject_CallMethodObjArgs(param, as_tuple, NULL);
     if (dec_tuple == NULL) {
         return NULL;
     }
@@ -422,7 +488,7 @@ _get_bool_from_method(PyObject *val, PyObject* method, char *err_msg)
     PyObject *bool_ret;
     int ret;
 
-    bool_ret = PyObject_CallMethodNoArgs(val, method);
+    bool_ret = PyObject_CallMethodObjArgs(val, method, NULL);
     if (bool_ret == NULL) {
         return -1;
     }
@@ -441,9 +507,9 @@ int
 fill_numeric_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
-    Py_ssize_t pg_weight, npg_digits;
+    Py_ssize_t pg_weight;
     uint16_t pg_sign, pg_scale;
-    int finite;
+    int finite, npg_digits;
     char *buf;
 
     finite = _get_bool_from_method(
@@ -479,7 +545,7 @@ fill_numeric_info(
         pg_scale = exp < 0 ? -exp : 0;
 
         ndigits = PyTuple_GET_SIZE(py_digits);
-        // Calculate pg_weigth
+        // Calculate pg_weight
         // A PostgreSQL numeric pg_digit is a number from 0 to 9999, and
         // represents 4 decimal digits.
         // "ndigits + exp", i.e. the number of decimal digits plus the
@@ -499,7 +565,7 @@ fill_numeric_info(
             q--;
         }
         pg_weight = q + (r > 0) - 1;
-        if (pg_weight < INT16_MIN || pg_weight > INT16_MAX) {
+        if (pg_weight > INT16_MAX) {
             // Out of Postgres range. Bind as text.
             Py_DECREF(py_digits);
             return fill_object_info(param_info, oid, p_fmt, param);
@@ -509,12 +575,10 @@ fill_numeric_info(
         // The pg_digits are aligned around the decimal point.
         // For example the value 12345.67 should be encoded as the three
         // pg_digits: 0001 2345 6700
+        // Note: npg_digits will never overflow UINT16_MAX, because of previous
+        // checks on pg_weight and exp
         npg_digits = ndigits / 4 + (r > 0) + (r < ndigits % 4);
-        if (npg_digits > 0xFFFF) {
-            // Out of Postgres range. Bind as text.
-            Py_DECREF(py_digits);
-            return fill_object_info(param_info, oid, p_fmt, param);
-        }
+
         // Allocate memory for binary value
         param_info->len = 8 + npg_digits * 2;
         param_info->ptr = PyMem_Malloc(param_info->len);

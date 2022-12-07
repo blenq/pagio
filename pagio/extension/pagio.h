@@ -21,7 +21,6 @@ typedef struct {
     const char* ptr;
     union {
         char c;
-        short int2;
         int int4;
         long long int8;
         double float8;
@@ -32,11 +31,13 @@ typedef struct {
     PyObject *obj;
 } ParamInfo;
 
+#define InvalidOid 0
 #define CHAROID 18
 #define NAMEOID 19
 #define TEXTOID 25
 #define BPCHAROID 1042
 #define VARCHAROID 1043
+
 
 
 #endif /* _PAGIO_H */

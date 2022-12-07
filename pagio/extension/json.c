@@ -1,4 +1,5 @@
 #include "json.h"
+#include "array.h"
 
 static PyObject *json_loads;
 
@@ -21,6 +22,13 @@ convert_pg_json_txt(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_jsonarray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_json_txt);
+}
+
+
+PyObject *
 convert_pg_jsonb_bin(PPObject *self, char *buf, int len)
 {
     // Convert a PG json binary value to Python json value
@@ -31,6 +39,14 @@ convert_pg_jsonb_bin(PPObject *self, char *buf, int len)
         return NULL;
     }
     return convert_pg_json_txt(self, buf + 1, len - 1);
+}
+
+
+PyObject *
+convert_pg_jsonbarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, JSONBOID, convert_pg_jsonb_bin);
 }
 
 

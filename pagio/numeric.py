@@ -3,10 +3,10 @@ import struct
 from codecs import decode
 from decimal import Decimal
 from struct import Struct
-from typing import Tuple, Any, Generator, Union
+from typing import Tuple, Any, Generator, Union, List
 
 from . import const
-from .common import ushort_struct_unpack_from, Format, ProtocolError
+from .common import ushort_struct, Format, ProtocolError
 from .text import default_to_pg
 
 
@@ -86,7 +86,7 @@ def bin_numeric_to_python(buf: memoryview) -> Decimal:
 
     def get_digits() -> Generator[int, None, None]:
         for i in range(npg_digits):
-            [pg_digit] = ushort_struct_unpack_from(buf, i * 2)
+            [pg_digit] = ushort_struct.unpack_from(buf, i * 2)
             if pg_digit > 9999:
                 raise ValueError("Invalid value")
             # a postgres digit contains 4 decimal digits
@@ -105,19 +105,23 @@ def bin_numeric_to_python(buf: memoryview) -> Decimal:
 def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
     """ Converts a Python decimal to a binary PG numeric """
 
+    # Use the relatively complex binary format. To determine if a Decimal is
+    # in the range of a PostgreSQL numeric, it has to be analyzed anyway.
+    # From there it is only a small step to creating the binary value.
+
     pg_digits = []
     if val.is_finite():
-        # Regular finite number
+        # Regular numeric value
 
         sign, digits, exp = val.as_tuple()
+        pg_sign = NUMERIC_NEG if sign else NUMERIC_POS
         if exp < -0x3FFF:
             # outside PG range, fallback to text
             return default_to_pg(val)
 
-        # PG scale can not be negative.
+        # PG scale, is the number of digits after the decimal point. It can not
+        # be negative.
         pg_scale = 0 if exp > 0 else -exp
-
-        pg_sign = NUMERIC_NEG if sign else NUMERIC_POS
 
         # A PostgreSQL numeric pg_digit is a number from 0 to 9999, and
         # represents 4 decimal digits.
@@ -126,7 +130,7 @@ def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
         # pg_weight is 10000 based exponent of first pg_digit minus one
         q, r = divmod(len(digits) + exp, 4)
         pg_weight = q + bool(r) - 1
-        if pg_weight < -0x8000 or pg_weight > 0x7FFF:
+        if pg_weight > 0x7FFF:
             # outside PG range
             return default_to_pg(val)
 

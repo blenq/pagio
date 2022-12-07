@@ -60,17 +60,6 @@ static inline void pack_int4(char *ptr, int32_t val) {
 }
 
 
-static int read_uint(char **ptr, char *end, uint32_t *val) {
-    if ((size_t) (end - *ptr) < sizeof(uint32_t)) {
-        PyErr_SetString(PyExc_ValueError, "Invalid size for uint");
-        *val = 0;
-        return -1;
-    }
-    *val = unpack_uint4(*ptr);
-    *ptr += sizeof(uint32_t);
-    return 0;
-}
-
 static PyObject *
 read_int_from_uint(char **ptr, char *end) {
     unsigned int val;
@@ -78,11 +67,6 @@ read_int_from_uint(char **ptr, char *end) {
         return NULL;
     }
     return PyLong_FromUnsignedLong(val);
-}
-
-
-static inline int read_int(char **ptr, char *end, int32_t *val) {
-    return read_uint(ptr, end, (uint32_t *)val);
 }
 
 
@@ -177,6 +161,7 @@ PP_traverse(PPObject *self, visitproc visit, void *arg)
     Py_VISIT(self->server_parameters);
     Py_VISIT(self->zone_info);
     Py_VISIT(self->res_fields);
+    Py_VISIT(self->custom_res_converters);
     return 0;
 }
 
@@ -202,6 +187,7 @@ PP_clear(PPObject *self)
     Py_CLEAR(self->stmt_to_close);
     Py_CLEAR(self->server_parameters);
     Py_CLEAR(self->zone_info);
+    Py_CLEAR(self->custom_res_converters);
     return 0;
 }
 
@@ -289,12 +275,34 @@ static res_converter *
 get_converters(unsigned int type_oid) {
     static res_converter
         bool_converters[2] = {convert_pg_bool_text, convert_pg_bool_bin},
+        boolarray_converters[2] = {
+            convert_pg_boolarray_text, convert_pg_boolarray_bin},
         text_converters[2] = {convert_pg_text, convert_pg_text},
+        textarray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_textarray_bin},
+        varchararray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_varchararray_bin},
+        namearray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_namearray_bin},
+        bpchararray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_bpchararray_bin},
+        chararray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_chararray_bin},
         float4_converters[2] = {convert_pg_float_text, convert_pg_float4_bin},
+        float4array_converters[2] = {
+            convert_pg_floatarray_text, convert_pg_float4array_bin},
         float8_converters[2] = {convert_pg_float_text, convert_pg_float8_bin},
+        float8array_converters[2] = {
+            convert_pg_floatarray_text, convert_pg_float8array_bin},
         int2_converters[2] = {convert_pg_int_text, convert_pg_int2_bin},
+        int2array_converters[2] = {
+            convert_pg_intarray_text, convert_pg_int2array_bin},
         int4_converters[2] = {convert_pg_int_text, convert_pg_int4_bin},
+        int4array_converters[2] = {
+            convert_pg_intarray_text, convert_pg_int4array_bin},
         int8_converters[2] = {convert_pg_int_text, convert_pg_int8_bin},
+        int8array_converters[2] = {
+            convert_pg_intarray_text, convert_pg_int8array_bin},
         uint4_converters[2] = {convert_pg_int_text, convert_pg_uint4_bin},
         inet_converters[2] = {convert_pg_inet_text, convert_pg_inet_bin},
         cidr_converters[2] = {convert_pg_cidr_text, convert_pg_cidr_bin},
@@ -309,29 +317,58 @@ get_converters(unsigned int type_oid) {
             convert_pg_timestamp_text, convert_pg_timestamp_bin},
         timestamptz_converters[2] = {
             convert_pg_timestamptz_text, convert_pg_timestamptz_bin},
+        interval_converters[2] = {
+            convert_pg_interval_text, convert_pg_interval_bin},
+        intervalarray_converters[2] = {
+            convert_pg_intervalarray_text, convert_pg_intervalarray_bin},
         jsonb_converters[2] = {convert_pg_json_txt, convert_pg_jsonb_bin},
+        jsonbarray_converters[2] = {
+            convert_pg_jsonarray_txt, convert_pg_jsonbarray_bin},
         json_converters[2] = {convert_pg_json_txt, convert_pg_json_txt},
         default_converters[2] = {convert_pg_text, convert_pg_binary};
 
     switch (type_oid) {
     case BOOLOID:
         return bool_converters;
+    case BOOLARRAYOID:
+        return boolarray_converters;
     case BPCHAROID:
     case CHAROID:
     case NAMEOID:
     case TEXTOID:
     case VARCHAROID:
+    case XMLOID:
         return text_converters;
+    case TEXTARRAYOID:
+        return textarray_converters;
+    case VARCHARARRAYOID:
+        return varchararray_converters;
+    case NAMEARRAYOID:
+        return namearray_converters;
+    case BPCHARARRAYOID:
+        return bpchararray_converters;
+    case CHARARRAYOID:
+        return chararray_converters;
     case FLOAT4OID:
         return float4_converters;
+    case FLOAT4ARRAYOID:
+        return float4array_converters;
     case FLOAT8OID:
         return float8_converters;
+    case FLOAT8ARRAYOID:
+        return float8array_converters;
     case INT2OID:
         return int2_converters;
+    case INT2ARRAYOID:
+        return int2array_converters;
     case INT4OID:
         return int4_converters;
+    case INT4ARRAYOID:
+        return int4array_converters;
     case INT8OID:
         return int8_converters;
+    case INT8ARRAYOID:
+        return int8array_converters;
     case OIDOID:
         return uint4_converters;
     case INETOID:
@@ -354,10 +391,16 @@ get_converters(unsigned int type_oid) {
         return timestamp_converters;
     case TIMESTAMPTZOID:
         return timestamptz_converters;
+    case INTERVALOID:
+        return interval_converters;
+    case INTERVALARRAYOID:
+        return intervalarray_converters;
     case JSONBOID:
         return jsonb_converters;
     case JSONOID:
         return json_converters;
+    case JSONBARRAYOID:
+        return jsonbarray_converters;
     default:
         return default_converters;
     }
@@ -365,9 +408,12 @@ get_converters(unsigned int type_oid) {
 
 
 static PyObject *
-read_field_info(char **buf, char *end, res_converter **converters)
+read_field_info(
+    PPObject * self, char **buf, char *end, res_converter **converters)
 {
+    static res_converter empty_converters[2] = {NULL, NULL};
     PyObject *field_info = NULL, *info_val;
+    int contains = 0;
     unsigned int type_oid;
     short type_fmt;
 
@@ -406,6 +452,18 @@ read_field_info(char **buf, char *end, res_converter **converters)
         goto error;
     }
     PyStructSequence_SET_ITEM(field_info, 3, info_val);
+    if (self->custom_res_converters) {
+        contains = PyDict_Contains(self->custom_res_converters, info_val);
+        if (contains == -1) {
+            goto error;
+        }
+    }
+    if (contains) {
+        *converters = empty_converters;
+    }
+    else {
+        *converters = get_converters(type_oid);
+    }
 
     // type_size
     info_val = read_int_from_short(buf, end);
@@ -435,7 +493,6 @@ read_field_info(char **buf, char *end, res_converter **converters)
     }
     PyStructSequence_SET_ITEM(field_info, 6, info_val);
 
-    *converters = get_converters(type_oid);
     return field_info;
 error:
     Py_DECREF(field_info);
@@ -471,7 +528,7 @@ PPhandle_rowdescription(PPObject *self, char **buf, char *end)
     for (i = 0; i < num_cols; i++) {
         PyObject *field_info;
 
-        field_info = read_field_info(buf, end, self->res_converters + i);
+        field_info = read_field_info(self, buf, end, self->res_converters + i);
         if (field_info == NULL) {
             goto error;
         }
@@ -530,7 +587,7 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
     unsigned short num_cols;
     int i, ret = -1;
     PyObject *row = NULL;
-    res_converter *raw_converters;
+    res_converter *raw_converters = NULL;
 
     // read number of values in row
     if (read_ushort(buf, end, &num_cols) == -1) {
@@ -577,9 +634,30 @@ PPhandle_datarow(PPObject *self, char **buf, char *end) {
             }
 
             // get the value
-            convs = self->raw_result ? raw_converters : self->res_converters[i];
-            obj = convs[(unsigned char)self->result_format](
-                self, *buf, val_len);
+            if (self->raw_result) {
+                obj = raw_converters[(unsigned char)self->result_format](
+                    self, *buf, val_len);
+            }
+            else {
+                convs = self->res_converters[i];
+                if (convs[0] == NULL) {
+                    PyObject *custom_res_conv = PyUnicode_FromString("custom_res_conv");
+                    PyObject *mem = PyMemoryView_FromMemory(*buf, val_len, PyBUF_READ);
+                    PyObject *finfo = PyTuple_GET_ITEM(self->res_fields, i);
+                    PyObject *py_oid = PyTuple_GET_ITEM(finfo, 3);
+                    obj = PyObject_CallMethodObjArgs(
+                        (PyObject *)self, custom_res_conv, mem, py_oid, PyLong_FromLong(self->result_format), NULL);
+                }
+                else {
+                    obj = convs[(unsigned char)self->result_format](
+                        self, *buf, val_len);
+                }
+            }
+//
+//
+//            convs = self->raw_result ? raw_converters : self->res_converters[i];
+//            obj = convs[(unsigned char)self->result_format](
+//                self, *buf, val_len);
             if (obj == NULL) {
                 goto end;
             }
@@ -753,26 +831,26 @@ ready_cache(PPObject *self) {
             // Cache is full, remove oldest one
             Py_ssize_t ppos = 0;
             PyObject *old_key, *old_cache_item;
+            Py_hash_t old_hash;
 
-            // remove oldest item from cache
-            PyDict_Next(self->stmt_cache, &ppos, &old_key, &old_cache_item);
-            Py_INCREF(old_key);
-            Py_INCREF(old_cache_item);
-            int del_ret = PyDict_DelItem(self->stmt_cache, old_key);
-            Py_DECREF(old_key);
-            if (del_ret == -1) {
-                Py_DECREF(old_cache_item);
-                return -1;
-            }
+            // get oldest item from cache
+            _PyDict_Next(
+                self->stmt_cache, &ppos, &old_key, &old_cache_item, &old_hash);
+
             // Reuse statement index
             stmt_index = PagioST_INDEX(old_cache_item);
 
             if (PagioST_PREPARED(old_cache_item)) {
                 // Statement is prepared, mark for closure
                 self->stmt_to_close = old_cache_item;
+                Py_INCREF(old_cache_item);
             }
-            else {
-                Py_DECREF(old_cache_item);
+
+            int del_ret = _PyDict_DelItem_KnownHash(
+                self->stmt_cache, old_key, old_hash);
+            if (del_ret == -1) {
+                Py_CLEAR(self->stmt_to_close);
+                return -1;
             }
         }
         else {
@@ -1056,17 +1134,21 @@ fill_param_info(
 
 static void
 clean_param_info(ParamInfo *param_info, Py_ssize_t num_params) {
+    // Clean up and deallocate parameters
     Py_ssize_t i;
 
     for (i = 0; i < num_params; i++) {
         ParamInfo *p_info = param_info + i;
         if (p_info->obj) {
+            // Clean up reference to Python object
             Py_DECREF(p_info->obj);
         }
         if (p_info->flags & PARAM_NEEDS_FREE) {
+            // Clean up memory allocated with PyMem_Malloc
             PyMem_Free((void *)p_info->ptr);
         }
     }
+    // Clean up itself
     PyMem_Free(param_info);
 }
 
@@ -1224,24 +1306,24 @@ lookup_cache(
                 *prepared = 1;
                 *index = PagioST_INDEX(self->cache_item);
 
-                if (PagioST_RES_FIELDS(self->cache_item)) {
+                self->res_fields = PagioST_RES_FIELDS(self->cache_item);
+                if (self->res_fields) {
+                    Py_INCREF(self->res_fields);
                     self->res_rows = PyList_New(0);
                     if (self->res_rows == NULL) {
                         return -1;
                     }
-                    self->res_fields = PagioST_RES_FIELDS(self->cache_item);
-                    Py_INCREF(self->res_fields);
                     self->res_converters = PagioST_RES_CONVERTERS(
                         self->cache_item);
                 }
                 else {
                     self->res_rows = NULL;
-                    self->res_fields = NULL;
                     self->res_converters = NULL;
                 }
             }
         }
-        else if (PagioST_NUM_EXECUTED(self->cache_item) == self->prepare_threshold) {
+        else if (PagioST_NUM_EXECUTED(
+                self->cache_item) == self->prepare_threshold) {
             // Not prepared server-side yet, but it reached the threshold.
             // Set the index to prepare server side
             *index = PagioST_INDEX(self->cache_item);
@@ -1453,6 +1535,7 @@ _PPexecute_message(
 
     num_params = PyTuple_GET_SIZE(params);
     if (num_params) {
+        // Allocate memory for PG parameters
         param_info = PyMem_Calloc(num_params, sizeof(ParamInfo));
         p_formats = PyMem_Calloc(num_params, sizeof(unsigned short));
         if (param_info == NULL || p_formats == NULL) {
@@ -1466,6 +1549,7 @@ _PPexecute_message(
         }
         oids = (unsigned int *)PyBytes_AS_STRING(oid_bytes);
 
+        // Fill PG parameters
         if (fill_params(
                 params, param_info, oids, p_formats, &param_vals_len) == -1) {
             goto error;
@@ -1596,6 +1680,19 @@ PPrequest_ssl(PPObject *self, PyObject *Py_UNUSED(un_used))
     Py_RETURN_NONE;
 }
 
+static PyObject *
+PP_get_custom_res_converters(PPObject *self, void *closure)
+{
+    if (self->custom_res_converters == NULL) {
+        self->custom_res_converters = PyDict_New();
+        if (self->custom_res_converters == NULL) {
+            return NULL;
+        }
+    }
+    Py_INCREF(self->custom_res_converters);
+    return self->custom_res_converters;
+}
+
 
 static PyMethodDef PP_methods[] = {
     {"get_buffer", (PyCFunction) PPget_buffer, METH_VARARGS,
@@ -1609,6 +1706,13 @@ static PyMethodDef PP_methods[] = {
     },
     {"_setup_ssl_request", (PyCFunction) PPrequest_ssl, METH_NOARGS, "request ssl"},
     {NULL}  /* Sentinel */
+};
+
+
+static PyGetSetDef PP_getsetters[] = {
+    {"_custom_res_converters", (getter) PP_get_custom_res_converters, NULL,
+     "custom result converter", NULL},
+    {NULL},
 };
 
 
@@ -1653,6 +1757,7 @@ static PyTypeObject PPType = {
     .tp_clear = (inquiry) PP_clear,
     .tp_members = PP_members,
     .tp_methods = PP_methods,
+    .tp_getset = PP_getsetters,
 };
 
 

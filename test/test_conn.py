@@ -1,11 +1,13 @@
+from codecs import decode
 import gc
+import re
 import unittest
 import weakref
 
 from pagio import (
     Connection, TransactionStatus, ProtocolStatus, ServerError, Format,
     sync_connection, sync_protocol, CachedQueryExpired, StatementDoesNotExist,
-    SSLMode,
+    SSLMode, JSONBOID, JSONBARRAYOID,
 )
 
 
@@ -33,6 +35,13 @@ class ConnCase(unittest.TestCase):
         cn = Connection(database="postgres")
         self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
         cn.close()
+
+    def test_server_version(self):
+        cn = Connection(database="postgres")
+        version_str = cn.server_parameters["server_version"]
+        m = re.match(r"(\d+)\.(\d+)", version_str)
+        self.assertEqual(
+            cn.server_version, int(m.group(1)) * 10000 + int(m.group(2)))
 
     def test_simple_query(self):
         cn = Connection(database="postgres")
@@ -65,7 +74,6 @@ class ConnCase(unittest.TestCase):
             res = cn.execute(
                 "SET TIMEZONE TO 'Europe/Paris'", result_format=Format.BINARY)
             self.assertIsNone(res.fields)
-
 
     def test_select_cache(self):
         sql1 = "SELECT $1, $2"
@@ -275,6 +283,31 @@ class ConnCase(unittest.TestCase):
         del cn
         gc.collect()
         self.assertIsNone(wr())
+
+    def test_result_converter(self):
+        def conv_text(buf: memoryview) -> str:
+            return decode(buf)
+
+        def conv_bin(buf: memoryview) -> str:
+            return decode(buf[1:])
+
+        with Connection(database="postgres", prepare_threshold=1) as cn:
+            cn.register_res_converter(
+                JSONBOID, conv_text, conv_bin, JSONBARRAYOID)
+            res = cn.execute(
+                "SELECT '{\"key\": 3}'::jsonb", result_format=Format.TEXT)
+            self.assertEqual(res.rows[0][0], '{"key": 3}')
+            res = cn.execute(
+                "SELECT '{\"key\": 3}'::jsonb", result_format=Format.BINARY)
+            self.assertEqual(res.rows[0][0], '{"key": 3}')
+            res = cn.execute(
+                "SELECT ARRAY['{\"key\": 3}']::jsonb[]",
+                result_format=Format.TEXT)
+            self.assertEqual(res.rows[0][0], ['{"key": 3}'])
+            res = cn.execute(
+                "SELECT ARRAY['{\"key\": 3}']::jsonb[]",
+                result_format=Format.BINARY)
+            self.assertEqual(res.rows[0][0], ['{"key": 3}'])
 
 
 class PyConnCase(ConnCase):

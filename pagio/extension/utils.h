@@ -33,6 +33,11 @@ write_int2(char **buf, int16_t val) {
     write_uint2(buf, (uint16_t) val);
 }
 
+int read_uint(char **ptr, char *end, uint32_t *val);
+
+static inline int read_int(char **ptr, char *end, int32_t *val) {
+    return read_uint(ptr, end, (uint32_t *)val);
+}
 
 int fill_object_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param);

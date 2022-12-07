@@ -1,4 +1,5 @@
 #include "text.h"
+#include "array.h"
 
 
 static unsigned char digit_vals[256] = {
@@ -115,4 +116,46 @@ fill_bytes_info(
     *oid = BYTEAOID;
     *p_fmt = 1;
     return 0;
+}
+
+
+PyObject *
+convert_pg_textarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_textarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, TEXTOID, convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_varchararray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, VARCHAROID, convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_bpchararray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, BPCHAROID, convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_chararray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, CHAROID, convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_namearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, NAMEOID, convert_pg_text);
 }

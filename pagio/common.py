@@ -2,7 +2,8 @@
 
 import enum
 from struct import Struct
-from typing import Tuple, Any, Optional, Union, List, Iterator, NamedTuple
+from typing import (
+    Tuple, Any, Optional, Union, List, Iterator, NamedTuple, Callable)
 
 try:
     from typing import Protocol
@@ -10,8 +11,9 @@ except ImportError:
     from typing_extensions import Protocol  # type: ignore
 
 
-ushort_struct_unpack_from = Struct('!H').unpack_from
-int4_struct_unpack_from = Struct('!i').unpack_from
+ushort_struct = Struct('!H')
+
+ResConverter = Callable[[memoryview], Any]
 
 
 class Format(enum.IntEnum):
@@ -65,9 +67,11 @@ class InvalidOperationError(Error):
     """ Invalid operation error """
 
 
-class ServerError(Error):
-    """ Error reported by PostgreSQL server """
+class InterfaceError(Error):
+    """ Interface error """
 
+
+class ServerInfoMixin:
     args: Tuple[
         Severity, str, str, Optional[str], Optional[str],
         Union[None, str, int], Union[None, str, int], Optional[str],
@@ -164,12 +168,86 @@ class ServerError(Error):
         return str(self.args[:3])
 
 
-class CachedQueryExpired(ServerError):
+class ServerError(ServerInfoMixin, Error):
+    """ Error reported by PostgreSQL server """
+
+
+class DataError(ServerError):
+    """ Data Error """
+
+
+class OperationalError(ServerError):
+    """ Data Error """
+
+
+class IntegrityError(ServerError):
+    """ Data Error """
+
+
+class InternalError(ServerError):
+    """ Data Error """
+
+
+class ProgrammingError(ServerError):
+    """ Data Error """
+
+
+class NotSupportedError(ServerError):
+    """ Not suppored """
+
+
+class StatementDoesNotExist(InternalError):
+    """ Error raised when a cached query is deallocated. """
+
+
+class CachedQueryExpired(InternalError):
     """ Error raised when a cached query is expired. """
 
 
-class StatementDoesNotExist(ServerError):
-    """ Error raised when a cached query is deallocated. """
+class ServerWarning(ServerInfoMixin, Warning):
+    """ Warning class """
+
+
+class ServerNotice(ServerInfoMixin, Warning):
+    """ Warning class """
+
+
+error_classes = {
+    "08": OperationalError,
+    "0A": NotSupportedError,
+    "0Z": InternalError,
+    "20": ProgrammingError,
+    "21": ProgrammingError,
+    "22": DataError,
+    "23": IntegrityError,
+    "24": InternalError,
+    "25": InternalError,
+    "26": InternalError,
+    "27": InternalError,
+    "28": OperationalError,
+    "2B": InternalError,
+    "2D": InternalError,
+    "2F": InternalError,
+    "34": ProgrammingError,
+    "38": InternalError,
+    "39": InternalError,
+    "3B": InternalError,
+    "3D": ProgrammingError,
+    "3F": ProgrammingError,
+    "40": OperationalError,
+    "42": ProgrammingError,
+    "44": IntegrityError,
+    "53": OperationalError,
+    "54": OperationalError,
+    "55": OperationalError,
+    "57": OperationalError,
+    "58": OperationalError,
+    "72": InternalError,
+    "F0": InternalError,
+    "HV": OperationalError,
+    "P0": InternalError,
+    "XX": InternalError,
+}
 
 
 class FieldInfo(NamedTuple):

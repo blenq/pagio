@@ -1,13 +1,13 @@
 """ Text and bytea conversions """
-
+import json
 from binascii import a2b_hex
 from codecs import decode
-from json import loads, dumps
-from typing import Iterator, Generator, Any, Tuple
+from json import loads, dumps, JSONEncoder
+from typing import Iterator, Generator, Any, Tuple, Optional
 from uuid import UUID
 
 from .common import Format, ProtocolError
-from .const import UUIDOID, BYTEAOID, JSONBOID
+from .const import UUIDOID, BYTEAOID, JSONBOID, TEXTOID
 
 # ======== bytea ============================================================ #
 
@@ -51,6 +51,7 @@ def txt_bytea_to_python(buf: memoryview) -> bytes:
 
 
 def bytes_to_pg(val: bytes) -> Tuple[int, str, bytes, int, Format]:
+    """ Converts Python bytes valye to PG bytea value """
     val_len = len(val)
     return BYTEAOID, f"{val_len}s", val, val_len, Format.BINARY
 
@@ -68,15 +69,18 @@ def bin_uuid_to_python(buf: memoryview) -> UUID:
 
 
 def uuid_to_pg(val: UUID) -> Tuple[int, str, bytes, int, Format]:
+    """ Converts Python UUID value to PG uuid parameter """
     return UUIDOID, "16s", val.bytes, 16, Format.BINARY
 
 # ======== text ============================================================= #
 
 
-def str_to_pg(val: str, oid=0) -> Tuple[int, str, bytes, int, Format]:
+def str_to_pg(val: str, oid: Optional[int] = None) -> Tuple[int, str, bytes, int, Format]:
     """ Convert a Python string to a PG text parameter """
     bytes_val = val.encode()
     val_len = len(bytes_val)
+    if oid is None:
+        oid = TEXTOID
     return oid, f"{val_len}s", bytes_val, val_len, Format.TEXT
 
 
@@ -89,21 +93,28 @@ def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
 
 
 def txt_json_to_python(buf: memoryview) -> Any:
+    """ Converts textual PG json to Python """
     return loads(decode(buf))
 
 
 def bin_jsonb_to_python(buf: memoryview) -> Any:
+    """ Converts binary PG jsonb to Python """
     if buf[0] != 1:
         raise ProtocolError("Invalid jsonb version")
     return loads(decode(buf[1:]))
 
 
-class PGJson:
+class PGJson:  # pylint: disable=too-few-public-methods
+    """ Class to facilitate JSON PG parameter """
 
     oid = JSONBOID
 
-    def __init__(self, val):
-        self._val = dumps(val)
+    def __init__(self, val: Any, *, cls: Optional[JSONEncoder] = None) -> None:
+        self._val = val
+        self._encoder = cls
 
-    def __str__(self):
-        return self._val
+    def __str__(self) -> str:
+        return json.dumps(self._val, cls=self._encoder)
+
+    def __repr__(self):
+        return f"PGJson({repr(self._val)})"

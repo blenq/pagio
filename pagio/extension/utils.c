@@ -27,6 +27,19 @@ pack_uint2(char *ptr, uint16_t val) {
 
 
 int
+read_uint(char **ptr, char *end, uint32_t *val) {
+    if ((size_t) (end - *ptr) < sizeof(uint32_t)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid size for uint");
+        *val = 0;
+        return -1;
+    }
+    *val = unpack_uint4(*ptr);
+    *ptr += sizeof(uint32_t);
+    return 0;
+}
+
+
+int
 fill_unicode_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
@@ -38,6 +51,7 @@ fill_unicode_info(
         return -1;
     }
     param_info->len = (int) size;
+    *oid = TEXTOID;
     return 0;
 }
 
@@ -49,6 +63,17 @@ fill_object_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
     PyObject *str_param;
+
+    str_param = PyObject_Str(param);
+    if (str_param == NULL) {
+        return -1;
+    }
+    param_info->obj = str_param;
+    if (fill_unicode_info(param_info, oid, p_fmt, str_param) == -1) {
+        param_info->obj = NULL;
+        Py_DECREF(str_param);
+        return -1;
+    }
 
     if (PyObject_HasAttr(param, oid_str)) {
         // If the param object has an attribute "oid" use that.
@@ -73,17 +98,10 @@ fill_object_info(
 #endif
         *oid = (unsigned int)param_oid;
     }
+    else {
+        *oid = InvalidOid;
+    }
 
-    str_param = PyObject_Str(param);
-    if (str_param == NULL) {
-        return -1;
-    }
-    param_info->obj = str_param;
-    if (fill_unicode_info(param_info, oid, p_fmt, str_param) == -1) {
-        param_info->obj = NULL;
-        Py_DECREF(str_param);
-        return -1;
-    }
     return 0;
 }
 

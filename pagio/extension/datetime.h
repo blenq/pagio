@@ -9,6 +9,8 @@
 #define TIMETZOID 1266
 #define TIMESTAMPOID 1114
 #define TIMESTAMPTZOID 1184
+#define INTERVALOID 1186
+#define INTERVALARRAYOID 1187
 
 extern PyObject *Date;
 extern PyObject *Time;
@@ -27,6 +29,10 @@ PyObject *convert_pg_timestamp_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamp_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamptz_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_timestamptz_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_interval_text(PPObject *self, char *buf, int len);
+PyObject *convert_pg_interval_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_intervalarray_text(PPObject *self, char *buf, int len);
+PyObject *convert_pg_intervalarray_bin(PPObject *self, char *buf, int len);
 
 int fill_date_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param);

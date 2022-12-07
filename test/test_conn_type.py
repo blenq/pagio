@@ -6,7 +6,10 @@ from ipaddress import (
 import unittest
 from uuid import UUID, uuid4
 
-from pagio import Connection, sync_connection, sync_protocol, Format
+from pagio import (
+    Connection, sync_connection, sync_protocol, Format, ServerError, PGJson,
+    ServerWarning,
+)
 from pagio.zoneinfo import ZoneInfo
 
 
@@ -25,6 +28,9 @@ class ConnTypeCase(unittest.TestCase):
         self.assertEqual(val, res[0][0])
         res = self._cn.execute(sql, *params, result_format=Format.BINARY)
         self.assertEqual(val, res[0][0])
+
+    def test_concat_str(self):
+        self._test_val_result("SELECT CONCAT('hello', $1)", "hello@", "@")
 
     def test_ipv4_inet_result(self):
         self._test_val_result(
@@ -126,15 +132,30 @@ class ConnTypeCase(unittest.TestCase):
     def test_numeric_param(self):
         for val_str in [
             "12.34", "Infinity", "inf", "-infinity", "-inf", "1.234e123",
-            "8.7654e-765", "12345.67", "123.4567", "1234.567",
+            "8.7654e-765", "12345.67", "123.4567", "1234.567", "8.7654e-764",
+            "1000", "1E-16383", "1E+131071",
         ]:
             val = Decimal(val_str)
             self._test_val_result("SELECT $1 -- no-cache 11", val, val)
-        with Connection(database="postgres") as cn:
-            for val_str in ["Nan", "-NaN", "sNaN", "-sNaN"]:
-                val = Decimal(val_str)
-                res = cn.execute("SELECT $1 -- no-cache 12", val)
-                self.assertTrue(res.rows[0][0].is_nan())
+        for val_str in ["Nan", "-NaN", "sNaN", "-sNaN"]:
+            val = Decimal(val_str)
+            res = self._cn.execute(f"SELECT $1 -- no-cache val_str", val)
+            self.assertTrue(res.rows[0][0].is_nan())
+
+        # Out of range tests.
+        res = self._cn.execute("SELECT $1 -- oor 1", Decimal("1E-16384"))
+        self.assertEqual("1E-16384", res.rows[0][0])
+        res = self._cn.execute("SELECT $1 -- oor 2", Decimal("1E+131072"))
+        self.assertEqual("1E+131072", res.rows[0][0])
+
+        # Should be out of range on server. If not, adjust code to new
+        # situation
+        with self.assertRaises(ServerError) as cm:
+            self._cn.execute("SELECT '1E-16384'::numeric;")
+        self.assertEqual(cm.exception.code, "22003")
+        with self.assertRaises(ServerError) as cm:
+            self._cn.execute("SELECT '1E+131072'::numeric;")
+        self.assertEqual(cm.exception.code, "22003")
 
     def test_bytea_result(self):
         self._cn.execute("SET bytea_output TO 'hex'")
@@ -409,6 +430,130 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT '{\"hello\": \"world\"}'::json",
             {"hello": "world"})
+
+    def test_jsonb_param(self):
+        val = {"key_1": "value", "key_2": 13, "key_3": None}
+        self._test_val_result("SELECT $1", val, PGJson(val))
+
+    def test_int2_array_result(self):
+        self._test_val_result(
+            "SELECT '{{1, 2, 3}, {4, 5, 6}}'::int2[]",
+            [[1, 2, 3], [4, 5, 6]])
+        self._test_val_result("SELECT '{}'::int2[]", [])
+        self._test_val_result(
+            "SELECT '{{1, NULL, 3}, {4, 5, 6}}'::int2[]",
+            [[1, None, 3], [4, 5, 6]])
+
+    def test_int4_array_result(self):
+        self._test_val_result(
+            "SELECT '{{1, 2, 3}, {4, 5, 6}}'::int4[]",
+            [[1, 2, 3], [4, 5, 6]])
+        self._test_val_result("SELECT '{}'::int4[]", [])
+        self._test_val_result(
+            "SELECT '{{1, NULL, 3}, {4, 5, 6}}'::int4[]",
+            [[1, None, 3], [4, 5, 6]])
+
+    def test_int8_array_result(self):
+        self._test_val_result(
+            "SELECT '{{1, 2, 3}, {4, 5, 6}}'::int8[]",
+            [[1, 2, 3], [4, 5, 6]])
+        self._test_val_result("SELECT '{}'::int8[]", [])
+        self._test_val_result(
+            "SELECT '{{1, NULL, 3}, {4, 5, 6}}'::int8[]",
+            [[1, None, 3], [4, 5, 6]])
+
+    def test_float4_array_result(self):
+        for fmt in [Format.TEXT, Format.BINARY]:
+            res = self._cn.execute(
+                "SELECT '{1.2, 2.34, NULL, 3.456}'::float4[]",
+                result_format=fmt)
+            for v1, v2 in zip(res.rows[0][0], [1.2, 2.34, None, 3.456]):
+                if v2 is None:
+                    self.assertIsNone(v1)
+                else:
+                    # float4 to float8 conversion results in small differences
+                    self.assertAlmostEqual(v1, v2, places=6)
+
+    def test_float8_array_result(self):
+        for fmt in [Format.TEXT, Format.BINARY]:
+            res = self._cn.execute(
+                "SELECT '{1.2, 2.34, NULL, 3.456}'::float8[]",
+                result_format=fmt
+            )
+            self.assertEqual(res.rows[0][0], [1.2, 2.34, None, 3.456])
+
+    def test_text_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['hi', NULL, 'h\"o', 'h}o', 'h,o'];",
+            ['hi', None, 'h"o', 'h}o', 'h,o']
+        )
+        self._test_val_result(
+            "SELECT ARRAY['hi', NULL, 'h\"o', 'h}o', 'h,o']::varchar[];",
+            ['hi', None, 'h"o', 'h}o', 'h,o']
+        )
+        self._test_val_result(
+            "SELECT ARRAY['hio', NULL, 'h\"o', 'h}o', 'h,o']::char(3)[];",
+            ['hio', None, 'h"o', 'h}o', 'h,o']
+        )
+        self._test_val_result(
+            "SELECT ARRAY['h', NULL, '\"', '}', ',']::\"char\"[];",
+            ['h', None, '"', '}', ',']
+        )
+        self._test_val_result(
+            "SELECT ARRAY['hi', NULL, 'h\"o', 'h}o', 'h,o']::name[];",
+            ['hi', None, 'h"o', 'h}o', 'h,o']
+        )
+
+    def test_bool_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['true', NULL, 'false']::bool[];",
+            [True, None, False]
+        )
+
+    def test_jsonb_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['{\"key\": 3}', NULL, 'false']::jsonb[];",
+            [{"key": 3}, None, False]
+        )
+
+    def test_notice_response(self):
+        with self.assertWarns(ServerWarning):
+            self._cn.execute("COMMIT")
+
+    def test_interval_result(self):
+        self._cn.execute("SET IntervalStyle TO postgres")
+        self._test_val_result(
+            "SELECT '2 year -1 month -3 days 04:05:06'::interval;",
+            (23, timedelta(days=-3, hours=4, minutes=5, seconds=6)))
+        self._test_val_result(
+            "SELECT '2 year -1 month -3 days 23:59:59.999999'::interval;",
+            (23, timedelta(
+                -3, hours=23, minutes=59, seconds=59, microseconds=999999)))
+        self._test_val_result(
+            "SELECT '-2 year 4 mons'::interval", (-20, timedelta(0)))
+        self._test_val_result(
+            "SELECT '23 days -04:05:06'::interval;",
+            (0, timedelta(days=23, hours=-4, minutes=-5, seconds=-6)))
+        self._test_val_result(
+            "SELECT '-04:05:06'::interval;",
+            (0, timedelta(hours=-4, minutes=-5, seconds=-6)))
+        # self._cn.execute("SET IntervalStyle TO sql_standard")
+        # self._test_val_result(
+        #     "SELECT '2 year -1 month -3 days 04:05:06'::interval;",
+        #     "+1-11 -3 +4:05:06")
+
+    def test_interval_array_result(self):
+        self._cn.execute("SET IntervalStyle TO postgres")
+        self._test_val_result(
+            "SELECT ARRAY["
+            "    '2 year -1 month -3 days 04:05:06',"
+            "    '-2 year 4 mons']::interval[];",
+            [(23, timedelta(days=-3, hours=4, minutes=5, seconds=6)),
+             (-20, timedelta(0))])
+
+    def test_xml_result(self):
+        self._test_val_result(
+            "SELECT '<hi>hello</hi>'::xml", "<hi>hello</hi>")
 
 
 class PyConnTypeCase(ConnTypeCase):
