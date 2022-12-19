@@ -3,10 +3,22 @@
 
 uint32_t unpack_uint4(char *ptr)
 {
-    int ret;
+    uint32_t ret;
 
     memcpy(&ret, ptr, 4);
     return be32toh(ret);
+}
+
+
+float unpack_float4(char *ptr)
+{
+    union {
+        float fval;
+        uint32_t ival;
+    } val;
+
+    val.ival = unpack_uint4(ptr);
+    return val.fval;
 }
 
 
@@ -23,6 +35,24 @@ pack_uint2(char *ptr, uint16_t val) {
     uint16_t nval;
     nval = htobe16(val);
     memcpy(ptr, &nval, 2);
+}
+
+
+void
+pack_uint4(char *ptr, uint32_t val)
+{
+    uint32_t nval;
+    nval = htobe32(val);
+    memcpy(ptr, &nval, 4);
+}
+
+
+void
+pack_uint8(char *ptr, uint64_t val)
+{
+    uint64_t nval;
+    nval = htobe64(val);
+    memcpy(ptr, &nval, 8);
 }
 
 
@@ -51,7 +81,6 @@ fill_unicode_info(
         return -1;
     }
     param_info->len = (int) size;
-    *oid = TEXTOID;
     return 0;
 }
 
@@ -63,17 +92,6 @@ fill_object_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
 {
     PyObject *str_param;
-
-    str_param = PyObject_Str(param);
-    if (str_param == NULL) {
-        return -1;
-    }
-    param_info->obj = str_param;
-    if (fill_unicode_info(param_info, oid, p_fmt, str_param) == -1) {
-        param_info->obj = NULL;
-        Py_DECREF(str_param);
-        return -1;
-    }
 
     if (PyObject_HasAttr(param, oid_str)) {
         // If the param object has an attribute "oid" use that.
@@ -90,7 +108,7 @@ fill_object_info(
             return -1;
         }
 
-#if SIZEOF_LONG != 4    /* LP64 systems, like 64 bits linux */
+#if SIZEOF_ULONG != 4    /* LP64 systems, like 64 bits linux */
         if (param_oid > UINT32_MAX) {
             PyErr_SetString(PyExc_ValueError, "Invalid oid value");
             return -1;
@@ -98,8 +116,16 @@ fill_object_info(
 #endif
         *oid = (unsigned int)param_oid;
     }
-    else {
-        *oid = InvalidOid;
+
+    str_param = PyObject_Str(param);
+    if (str_param == NULL) {
+        return -1;
+    }
+    param_info->obj = str_param;
+    if (fill_unicode_info(param_info, oid, p_fmt, str_param) == -1) {
+        param_info->obj = NULL;
+        Py_DECREF(str_param);
+        return -1;
     }
 
     return 0;

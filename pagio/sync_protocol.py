@@ -1,10 +1,11 @@
 """ Synchronous version of Protocol """
 
 from collections import deque
+from io import TextIOBase
 import socket
 from struct import Struct
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
-from typing import Optional, Union, Any, List, Tuple, Deque
+from typing import Optional, Union, Any, List, Tuple, Deque, Mapping
 
 import scramp
 
@@ -14,7 +15,7 @@ from .base_protocol import (
     _STATUS_SSL_REQUESTED, _STATUS_EXECUTING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, SyncCopyFile,
-    Notification,
+    Notification, InterfaceError, ServerError, Severity,
 )
 
 
@@ -39,6 +40,30 @@ class _PGProtocol(_BasePGProtocol):
 
     def enqueue_notification(self, notification: Notification) -> None:
         self.notify_queue.append(notification)
+
+    def handle_copy_out_response(self, msg_buf: memoryview) -> None:
+        """ Handle a copy out response """
+        if self.file_obj is None:
+            raise ValueError("File object is not set")
+        try:
+            write_method = self.file_obj.write
+        except AttributeError as ex:
+            raise ValueError(
+                "Invalid output file, missing write method.") from ex
+        is_text_file = (
+                isinstance(self.file_obj, TextIOBase) or
+                "b" not in getattr(self.file_obj, "mode", "b"))
+        if is_text_file:
+            self._write_method = lambda data: write_method(data.decode())
+        else:
+            self._write_method = write_method
+
+    def handle_copy_data_response(self, msg_buf: memoryview) -> None:
+        """ Handle a copy data response """
+        self._write_method(bytes(msg_buf))
+
+    def handle_copy_done_response(self, msg_buf: memoryview) -> None:
+        """ Handle a copy done response """
 
     def _handle_copy_in_response(self) -> None:
         if self.file_obj is None:
@@ -132,13 +157,14 @@ class _PGProtocol(_BasePGProtocol):
             password: Union[None, str, bytes],
             tz_name: Optional[str],
             prepare_threshold: int,
+            options: Optional[Mapping[str, Optional[str]]],
             cache_size: int,
     ) -> None:
         """ Start up connection, including authentication """
 
         message = self._startup_message(
             user, database, application_name, tz_name, password,
-            prepare_threshold, cache_size)
+            options, prepare_threshold, cache_size)
         while isinstance(message, bytes):
             self.write(message)
             message = self.read()
@@ -178,6 +204,8 @@ class _PGProtocol(_BasePGProtocol):
         ret = self._sync_result
         self._sync_result = NO_RESULT
         if isinstance(ret, BaseException):
+            if isinstance(ret, ServerError) and ret.severity == Severity.FATAL:
+                self._close()
             raise ret
         return ret
 
@@ -190,6 +218,8 @@ class _PGProtocol(_BasePGProtocol):
             file_obj: Optional[SyncCopyFile],
     ) -> ResultSet:
         """ Execute a query text and return the result """
+        if self.sock is None:
+            raise InterfaceError("Connection is closed.")
         self.writelines(
             self.execute_message(
                 sql, parameters, result_format, raw_result, file_obj))
@@ -227,8 +257,10 @@ class _PGProtocol(_BasePGProtocol):
         self._close()
 
     def _close(self) -> None:
-        self.sock.close()
-        self._status = _STATUS_CLOSED
+        if self.sock is not None:
+            self.sock.close()
+            self._status = _STATUS_CLOSED
+            self.sock = None
 
     def _set_exception(self, ex: BaseException) -> None:
         self._sync_result = ex
@@ -248,21 +280,20 @@ class NotificationQueue:
 
     def get(self, timeout: Optional[float] = None) -> Notification:
         """ Gets a notification """
-
-        try:
-            self._protocol.sock.settimeout(timeout)
-            while not self._protocol.notify_queue:
-                self._protocol.poll()
-        except (socket.timeout, BlockingIOError) as ex:
-            raise QueueEmpty from ex
-        finally:
-            self._protocol.sock.settimeout(None)
+        if self.empty():
+            try:
+                self._protocol.sock.settimeout(timeout)
+                while not self._protocol.notify_queue:
+                    self._protocol.poll()
+            except (socket.timeout, BlockingIOError) as ex:
+                raise QueueEmpty from ex
+            finally:
+                self._protocol.sock.settimeout(None)
 
         return self._protocol.notify_queue.popleft()
 
     def get_nowait(self) -> Notification:
         """ Gets a notification from the queue without waiting """
-
         return self.get(timeout=0)
 
     def qsize(self) -> int:

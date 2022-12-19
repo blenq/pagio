@@ -1,4 +1,5 @@
 #include "uuid.h"
+#include "complex.h"
 
 PyObject *UUID;
 
@@ -20,6 +21,13 @@ convert_pg_uuid_bin(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_uuidarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, UUIDOID, convert_pg_uuid_bin);
+}
+
+
+PyObject *
 convert_pg_uuid_text(PPObject *self, char *buf, int len)
 {
     // converts PG text UUID to Python uuid
@@ -32,6 +40,13 @@ convert_pg_uuid_text(PPObject *self, char *buf, int len)
     uuid_val = PyObject_CallFunctionObjArgs(UUID, hex_str, NULL);
     Py_DECREF(hex_str);
     return uuid_val;
+}
+
+
+PyObject *
+convert_pg_uuidarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_uuid_text);
 }
 
 
@@ -48,25 +63,22 @@ fill_uuid_info(
     }
     if (!PyBytes_Check(bytes_val)) {
         PyErr_SetString(PyExc_ValueError, "Invalid uuid bytes value.");
-        Py_DECREF(bytes_val);
-        return -1;
+        goto error;
     }
     if (PyBytes_GET_SIZE(bytes_val) != 16) {
         PyErr_SetString(PyExc_ValueError, "Invalid uuid byte value length.");
-        Py_DECREF(bytes_val);
-        return -1;
+        goto error;
     }
     // Set param values
     param_info->ptr = PyBytes_AS_STRING(bytes_val);
-    if (param_info->ptr == NULL) {
-        Py_DECREF(bytes_val);
-        return -1;
-    }
     param_info->len = 16;
     param_info->obj = bytes_val;  // keep reference, will be cleaned up later
     *oid = UUIDOID;
     *p_fmt = 1;
     return 0;
+error:
+    Py_DECREF(bytes_val);
+    return -1;
 }
 
 

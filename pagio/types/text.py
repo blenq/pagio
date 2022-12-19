@@ -6,13 +6,16 @@ from json import loads, dumps, JSONEncoder
 from typing import Iterator, Generator, Any, Tuple, Optional
 from uuid import UUID
 
-from .common import Format, ProtocolError
-from .const import UUIDOID, BYTEAOID, JSONBOID, TEXTOID
+from .array import PGArray
+from ..common import Format, ProtocolError
+from ..const import (
+    UUIDOID, BYTEAOID, JSONBOID, TEXTOID, TEXTARRAYOID, UUIDARRAYOID,
+    JSONBARRAYOID, UNKNOWNOID, REGCONFIGOID)
 
 # ======== bytea ============================================================ #
 
 
-def txt_bytea_to_python(buf: memoryview) -> bytes:
+def txt_bytea_to_python(conn, buf: memoryview) -> bytes:
     """ Converts a PG textual bytea value to Python bytes object """
 
     if buf[:2] == b'\\x':
@@ -58,12 +61,12 @@ def bytes_to_pg(val: bytes) -> Tuple[int, str, bytes, int, Format]:
 # ======== uuid ============================================================= #
 
 
-def txt_uuid_to_python(buf: memoryview) -> UUID:
+def txt_uuid_to_python(conn, buf: memoryview) -> UUID:
     """ Converts PG textual value to Python UUID """
     return UUID(decode(buf))
 
 
-def bin_uuid_to_python(buf: memoryview) -> UUID:
+def bin_uuid_to_python(conn, buf: memoryview) -> UUID:
     """ Converts PG binary value to Python UUID """
     return UUID(bytes=bytes(buf))
 
@@ -71,6 +74,11 @@ def bin_uuid_to_python(buf: memoryview) -> UUID:
 def uuid_to_pg(val: UUID) -> Tuple[int, str, bytes, int, Format]:
     """ Converts Python UUID value to PG uuid parameter """
     return UUIDOID, "16s", val.bytes, 16, Format.BINARY
+
+
+class PGUUIDArray(PGArray):
+    oid = UUIDARRAYOID
+
 
 # ======== text ============================================================= #
 
@@ -80,7 +88,7 @@ def str_to_pg(val: str, oid: Optional[int] = None) -> Tuple[int, str, bytes, int
     bytes_val = val.encode()
     val_len = len(bytes_val)
     if oid is None:
-        oid = TEXTOID
+        oid = 0
     return oid, f"{val_len}s", bytes_val, val_len, Format.TEXT
 
 
@@ -92,12 +100,12 @@ def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
 # ======== jsonb ============================================================ #
 
 
-def txt_json_to_python(buf: memoryview) -> Any:
+def txt_json_to_python(conn, buf: memoryview) -> Any:
     """ Converts textual PG json to Python """
     return loads(decode(buf))
 
 
-def bin_jsonb_to_python(buf: memoryview) -> Any:
+def bin_jsonb_to_python(conn, buf: memoryview) -> Any:
     """ Converts binary PG jsonb to Python """
     if buf[0] != 1:
         raise ProtocolError("Invalid jsonb version")
@@ -118,3 +126,25 @@ class PGJson:  # pylint: disable=too-few-public-methods
 
     def __repr__(self):
         return f"PGJson({repr(self._val)})"
+
+
+class PGText(str):
+    oid = TEXTOID
+
+    def __repr__(self):
+        return f"PGText({super().__repr__()})"
+
+
+class PGRegConfig(str):
+    oid = REGCONFIGOID
+
+    def __repr__(self):
+        return f"PGRegConfig({super().__repr__()})"
+
+
+class PGTextArray(PGArray):
+    oid = TEXTARRAYOID
+
+
+class PGJsonArray(PGArray):
+    oid = JSONBARRAYOID

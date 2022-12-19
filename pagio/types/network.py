@@ -7,17 +7,20 @@ from ipaddress import (
 from struct import unpack_from
 from typing import Union, Callable, Any, cast, Tuple
 
-from .common import ProtocolError, check_length_equal, Format
-from .const import INETOID, CIDROID
+from .array import PGArray
+from ..common import ProtocolError, check_length_equal, Format
+from ..const import INETOID, CIDROID, INETARRAYOID
 from .text import str_to_pg
 
 
-def txt_inet_to_python(buf: memoryview) -> Union[IPv4Interface, IPv6Interface]:
+def txt_inet_to_python(
+        conn, buf: memoryview) -> Union[IPv4Interface, IPv6Interface]:
     """ Converts text to IP interface """
     return ip_interface(decode(buf))
 
 
-def txt_cidr_to_python(buf: memoryview) -> Union[IPv4Network, IPv6Network]:
+def txt_cidr_to_python(
+        conn, buf: memoryview) -> Union[IPv4Network, IPv6Network]:
     """ Converts text to IP network """
     return ip_network(decode(buf))
 
@@ -47,17 +50,18 @@ def bin_ip_to_python(buf: memoryview, cidr, cons) -> Any:
     return cons((addr_data, mask))
 
 
-def bin_inet_to_python(buf: memoryview) -> Any:
+def bin_inet_to_python(conn, buf: memoryview) -> Any:
     return bin_ip_to_python(buf, 0, ip_interface)
 
 
-def bin_cidr_to_python(buf: memoryview) -> Any:
+def bin_cidr_to_python(conn, buf: memoryview) -> Any:
     return bin_ip_to_python(buf, 1, ip_network)
 
 
-def ip_interface_to_pg(
-        val: Union[IPv4Address, IPv6Address, IPv4Interface, IPv6Interface]
-) -> Tuple[int, str, bytes, int, Format]:
+Inet = Union[IPv4Address, IPv6Address, IPv4Interface, IPv6Interface]
+
+
+def ip_interface_to_pg(val: Inet) -> Tuple[int, str, bytes, int, Format]:
     """ Converts an IP address or interface to PG inet """
     return str_to_pg(str(val), INETOID)
 
@@ -67,3 +71,25 @@ def ip_network_to_pg(
 ) -> Tuple[int, str, bytes, int, Format]:
     """ Converts an IP network to PG cidr """
     return str_to_pg(str(val), CIDROID)
+
+
+class PGInet:  # pylint: disable=too-few-public-methods
+    """ Class to facilitate JSON PG parameter """
+
+    oid = INETOID
+
+    def __init__(self, val: Union[str, Inet]) -> None:
+        if not isinstance(
+                val, (IPv4Address, IPv6Address, IPv4Interface, IPv6Interface)):
+            val = ip_interface(val)
+        self._val = val
+
+    def __str__(self) -> str:
+        return str(self._val)
+
+    def __repr__(self):
+        return repr(self._val)
+
+
+class PGInetArray(PGArray):
+    oid = INETARRAYOID

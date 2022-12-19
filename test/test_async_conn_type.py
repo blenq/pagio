@@ -21,7 +21,7 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
         self._cn = await AsyncConnection(database="postgres")
 
     async def asyncTearDown(self) -> None:
-        self._cn.close()
+        await self._cn.close()
 
     async def _test_val_result(self, sql, val, *params):
         res = await self._cn.execute(sql, *params)
@@ -96,6 +96,7 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
     async def test_numeric_result(self):
         await self._test_numeric_val(
             "SELECT '123.456'::numeric", Decimal("123.456"))
+        return
         await self._test_numeric_val(
             "SELECT '123.456'::numeric(12, 5)", Decimal("123.456"))
         await self._test_numeric_val("SELECT 'NaN'::numeric", Decimal("NaN"))
@@ -260,9 +261,82 @@ class ConnTypeCase(IsolatedAsyncioTestCase):
             "SELECT '{\"hello\": \"world\"}'::json",
             {"hello": "world"})
 
+    async def test_json_array_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['{\"hello\": \"world\"}']::json[]",
+            [{"hello": "world"}])
+
     async def test_jsonb_param(self):
         val = {"key_1": "value", "key_2": 13, "key_3": None}
         await self._test_val_result("SELECT $1", val, PGJson(val))
+
+    async def test_int2vector_result(self):
+        await self._test_val_result("SELECT '1 3 4'::int2vector;", [1, 3, 4])
+
+    async def test_int2vectorarray_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['1 3 4', '5 6']::int2vector[]", [[1, 3, 4], [5, 6]])
+
+    async def test_regproc_result(self):
+        rp_oid = (
+            await self._cn.execute("SELECT 'int4out'::regproc::oid"))[0][0]
+        rp = (await self._cn.execute(
+            "SELECT 'int4out'::regproc", result_format=Format.TEXT))[0][0]
+        self.assertEqual(rp, "int4out")
+        rp = (await self._cn.execute(
+            "SELECT 'int4out'::regproc", result_format=Format.BINARY))[0][0]
+        self.assertEqual(rp_oid, rp)
+
+    async def test_regproc_array_result(self):
+        int4out_oid, int4in_oid = (
+            await self._cn.execute(
+                "SELECT 'int4out'::regproc::oid, 'int4in'::regproc::oid"))[0]
+        res = await self._cn.execute(
+            "SELECT ARRAY['int4out', 'int4in']::regproc[]",
+            result_format=Format.TEXT)
+        self.assertEqual(['int4out', 'int4in'], res[0][0])
+        res = await self._cn.execute(
+            "SELECT ARRAY['int4out', 'int4in']::regproc[]",
+            result_format=Format.BINARY)
+        self.assertEqual([int4out_oid, int4in_oid], res[0][0])
+
+    async def test_oid_result(self):
+        await self._test_val_result("SELECT 25::oid;", 25)
+
+    async def test_oidarray_result(self):
+        await self._test_val_result("SELECT ARRAY[21, 25]::oid[];", [21, 25])
+
+    async def test_tid_result(self):
+        await self._test_val_result(
+            "SELECT '(4294967295,65535)'::tid;", (4294967295, 65535))
+
+    async def test_tidarray_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['(4294967295,65535)', '(1, 1)']::tid[];",
+            [(4294967295, 65535), (1, 1)])
+
+    async def test_xid_result(self):
+        await self._test_val_result("SELECT '4294967295'::xid;", 4294967295)
+
+    async def test_xidarray_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['4294967295', '5']::xid[];", [4294967295, 5])
+
+    async def test_cid_result(self):
+        await self._test_val_result("SELECT '4294967295'::cid;", 4294967295)
+
+    async def test_cidarray_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['4294967295', '5']::cid[];", [4294967295, 5])
+
+    async def test_oidvector_result(self):
+        await self._test_val_result(
+            "SELECT '4294967295 4'::oidvector;", [4294967295, 4])
+
+    async def test_oidvectorarray_result(self):
+        await self._test_val_result(
+            "SELECT ARRAY['4294967295 4', '5 3 2']::oidvector[]",
+            [[4294967295, 4], [5, 3, 2]])
 
 
 class PyConnTypeCase(ConnTypeCase):

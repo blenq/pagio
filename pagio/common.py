@@ -13,7 +13,7 @@ except ImportError:
 
 ushort_struct = Struct('!H')
 
-ResConverter = Callable[[memoryview], Any]
+ResConverter = Callable[[Any, memoryview], Any]
 
 
 class Format(enum.IntEnum):
@@ -21,6 +21,9 @@ class Format(enum.IntEnum):
     DEFAULT = -1
     TEXT = 0
     BINARY = 1
+
+
+ParamConverter = Callable[[Any], Tuple[int, str, Any, int, Format]]
 
 
 class Severity(enum.Enum):

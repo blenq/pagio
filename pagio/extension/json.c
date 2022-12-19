@@ -1,5 +1,5 @@
 #include "json.h"
-#include "array.h"
+#include "complex.h"
 
 static PyObject *json_loads;
 
@@ -47,6 +47,13 @@ convert_pg_jsonbarray_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_bin(
         self, buf, len, JSONBOID, convert_pg_jsonb_bin);
+}
+
+
+PyObject *
+convert_pg_jsonarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, JSONOID, convert_pg_json_txt);
 }
 
 

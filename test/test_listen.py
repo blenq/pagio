@@ -63,7 +63,7 @@ class PyListenCase(ListenCase):
 class AsyncListenCase(IsolatedAsyncioTestCase):
 
     async def test_basic_listen(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute("LISTEN chan")
             await cn.execute("NOTIFY chan, 'yes'")
             await cn.execute("NOTIFY chan")
@@ -74,8 +74,8 @@ class AsyncListenCase(IsolatedAsyncioTestCase):
 
     async def test_basic_listen_multi_process(self):
 
-        with await AsyncConnection(database="postgres") as cn1:
-            with await AsyncConnection(database="postgres") as cn2:
+        async with await AsyncConnection(database="postgres") as cn1:
+            async with await AsyncConnection(database="postgres") as cn2:
                 await cn1.execute("LISTEN chan")
                 task = asyncio.create_task(cn1.notifications.get())
                 await cn2.execute("NOTIFY chan, 'payload'")

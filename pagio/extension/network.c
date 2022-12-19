@@ -1,5 +1,6 @@
 #include "network.h"
 #include "utils.h"
+#include "complex.h"
 
 PyObject *IPv4Address;
 PyObject *IPv6Address;
@@ -19,9 +20,25 @@ convert_pg_inet_text(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_inetarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_inet_text);
+}
+
+
+PyObject *
 convert_pg_cidr_text(PPObject *self, char *buf, int len)
 {
     return PyObject_CallFunction(ip_network, "s#", buf, len);
+}
+
+
+PyObject *
+convert_pg_cidrarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_cidr_text);
 }
 
 
@@ -114,9 +131,23 @@ convert_pg_inet_bin(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_inetarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, INETOID, convert_pg_inet_bin);
+}
+
+
+PyObject *
 convert_pg_cidr_bin(PPObject *self, char *buf, int len)
 {
     return ip_binval(buf, len, 1);
+}
+
+
+PyObject *
+convert_pg_cidrarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, CIDROID, convert_pg_cidr_bin);
 }
 
 

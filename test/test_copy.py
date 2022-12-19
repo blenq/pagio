@@ -12,9 +12,9 @@ from pagio import (
 
 
 def get_lines(num):
-    yield "id,strval,dateval,datetimeval,floatval\n"
+    yield "id,strval,dateval,datetimeval,intval\n"
     for i in range(num):
-        yield f"{i},héllo_{i}_hi,2020-01-03,2020-01-03 14:32,{3.4 * i}\n"
+        yield f"{i},héllo_{i}_hi,2020-01-03,2020-01-03 14:32:00,{2 * (i + 1)}\n"
 
 
 create_temp_tbl_sql = """
@@ -23,7 +23,7 @@ create_temp_tbl_sql = """
         strval text,
         dateval date,
         datetimeval timestamp,
-        floatval float8);"""
+        intval int8);"""
 
 
 def get_input_file(encoding='utf-8'):
@@ -159,6 +159,32 @@ class CopyCase(unittest.TestCase):
                     file_obj=file_obj, result_format=Format.BINARY)
             self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
 
+    def test_copy_from_db(self):
+        with Connection(database="postgres") as cn:
+            cn.execute(create_temp_tbl_sql)
+            file_obj = get_input_file()
+            cn.execute(
+                "COPY input_table FROM STDIN (HEADER MATCH, FORMAT CSV)",
+                file_obj=file_obj)
+            output_file = BytesIO()
+            cn.execute(
+                "COPY (SELECT * FROM input_table ORDER BY id) TO STDOUT "
+                "(HEADER true, FORMAT CSV)", file_obj=output_file)
+            self.assertEqual(output_file.getvalue(), file_obj.getvalue())
+
+    def test_copy_text_from_db(self):
+        with Connection(database="postgres") as cn:
+            cn.execute(create_temp_tbl_sql)
+            file_obj = get_input_text_file()
+            cn.execute(
+                "COPY input_table FROM STDIN (HEADER MATCH, FORMAT CSV)",
+                file_obj=file_obj)
+            output_file = StringIO()
+            cn.execute(
+                "COPY (SELECT * FROM input_table ORDER BY id) TO STDOUT "
+                "(HEADER true, FORMAT CSV)", file_obj=output_file)
+            self.assertEqual(output_file.getvalue(), file_obj.getvalue())
+
 
 class PyCopyCase(CopyCase):
     @classmethod
@@ -175,7 +201,7 @@ class PyCopyCase(CopyCase):
 class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_db(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file()
             res = await cn.execute(
@@ -186,7 +212,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_copy_text_into_db(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
 
             file_obj = get_input_text_file()
@@ -199,7 +225,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_db_extended(self):
         # use Binary format to force Extended Query Protocol
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file()
             res = await cn.execute(
@@ -210,7 +236,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_copy_into_latin1(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file("latin-1")
 
@@ -232,7 +258,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
 
     async def test_copy_into_latin1_extended(self):
         # use binary format to force extended query
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = get_input_file("latin-1")
 
@@ -253,7 +279,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(1000, res.rows[0][0])
 
     async def test_error_raising_file(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = ErrorRaisingFile(get_input_file())
             with self.assertRaises(SpecialException):
@@ -263,7 +289,7 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
             self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
 
     async def test_error_raising_file_extended(self):
-        with await AsyncConnection(database="postgres") as cn:
+        async with await AsyncConnection(database="postgres") as cn:
             await cn.execute(create_temp_tbl_sql)
             file_obj = ErrorRaisingFile(get_input_file())
             with self.assertRaises(SpecialException):
@@ -271,6 +297,32 @@ class AsyncCopyCase(IsolatedAsyncioTestCase):
                     "COPY input_table FROM STDIN (HEADER MATCH, FORMAT CSV)",
                     file_obj=file_obj, result_format=Format.BINARY)
             self.assertEqual(cn.status, ProtocolStatus.READY_FOR_QUERY)
+
+    async def test_copy_from_db(self):
+        async with await AsyncConnection(database="postgres") as cn:
+            await cn.execute(create_temp_tbl_sql)
+            file_obj = get_input_file()
+            await cn.execute(
+                "COPY input_table FROM STDIN (HEADER MATCH, FORMAT CSV)",
+                file_obj=file_obj)
+            output_file = BytesIO()
+            await cn.execute(
+                "COPY (SELECT * FROM input_table ORDER BY id) TO STDOUT "
+                "(HEADER true, FORMAT CSV)", file_obj=output_file)
+            self.assertEqual(output_file.getvalue(), file_obj.getvalue())
+
+    async def test_copy_text_from_db(self):
+        async with await AsyncConnection(database="postgres") as cn:
+            await cn.execute(create_temp_tbl_sql)
+            file_obj = get_input_text_file()
+            await cn.execute(
+                "COPY input_table FROM STDIN (HEADER MATCH, FORMAT CSV)",
+                file_obj=file_obj)
+            output_file = StringIO()
+            await cn.execute(
+                "COPY (SELECT * FROM input_table ORDER BY id) TO STDOUT "
+                "(HEADER true, FORMAT CSV)", file_obj=output_file)
+            self.assertEqual(output_file.getvalue(), file_obj.getvalue())
 
 
 class PyAsyncCopyCase(AsyncCopyCase):

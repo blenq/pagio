@@ -5,20 +5,25 @@ from asyncio import (
     BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
     AbstractEventLoop, Queue, CancelledError,
 )
+from collections import deque
 from inspect import isawaitable
+from io import TextIOBase
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
 from struct import Struct
-from typing import Optional, Any, Union, cast, List, Tuple, Callable, Awaitable, Coroutine
+from typing import (
+    Optional, Any, Union, cast, List, Tuple, Callable, Awaitable, Coroutine,
+    Deque, Mapping,
+)
 
 import scramp
 
 from .base_protocol import (
     _BasePGProtocol, PyBasePGProtocol, TransactionStatus, _STATUS_CONNECTED,
     _STATUS_CLOSED, _STATUS_READY_FOR_QUERY, _STATUS_SSL_REQUESTED,
-    _STATUS_EXECUTING)
+    _STATUS_EXECUTING, _STATUS_CLOSING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, CopyFile,
-    Notification,
+    Notification, InterfaceError, ServerError, Severity,
 )
 
 
@@ -46,13 +51,87 @@ class _AsyncPGProtocol(_BasePGProtocol):
 
     def __init__(self) -> None:
         super().__init__()
+        self._loop = get_running_loop()
         self._read_fut: Optional[Future[Any]] = None
         self._write_fut: Optional[Future[None]] = None
-        self._loop = get_running_loop()
+        self._close_fut: Optional[Future[None]] = None
+        self._copy_out_fut: Optional[Future[Any]] = None
         self.notify_queue: Queue[Notification] = Queue()
+        self._copy_out_data: Optional[Deque[bytes]] = None
 
     def enqueue_notification(self, notification: Notification) -> None:
         self.notify_queue.put_nowait(notification)
+
+    def handle_copy_data_response(self, msg_buf: memoryview) -> None:
+        if self._copy_out_data is None and not self._copy_out_fut.done():
+            raise ValueError("Unexpected COPY OUT data")
+        self._copy_out_data.append(bytes(msg_buf))
+        if not self._copy_out_fut.done():
+            self._copy_out_fut.set_result(None)
+
+    def handle_copy_done_response(self, msg_buf: memoryview) -> None:
+        if self._copy_out_data is None:
+            if not self._copy_out_fut.done():
+                self._copy_out_fut.cancel()
+                raise ValueError("Unexpected COPY OUT data")
+            return
+        self._copy_out_data.append(None)
+        if not self._copy_out_fut.done():
+            self._copy_out_fut.set_result(None)
+
+    async def copy_out_task(self, user_fut: Future):
+        try:
+            write_method = self.file_obj.write
+        except AttributeError as ex:
+            raise ValueError(
+                "Invalid output file, missing write method.") from ex
+        if not isawaitable(write_method):
+            write_method = async_wrap(self._loop, write_method)
+        is_text_file = (
+                isinstance(self.file_obj, TextIOBase) or
+                "b" not in getattr(self.file_obj, "mode", "b"))
+        if not self._copy_out_fut.done():
+            self._transport.resume_reading()
+        while True:
+            await self._copy_out_fut
+            self._transport.pause_reading()
+            while self._copy_out_data:
+                data = self._copy_out_data.popleft()
+                if data is None:
+                    self._transport.resume_reading()
+                    self._copy_out_data = None
+                    await self._read_fut
+                    try:
+                        result = self._read_fut.result()
+                    except Exception as ex:
+                        if not user_fut.done():
+                            user_fut.set_exception(ex)
+                    else:
+                        if not user_fut.done():
+                            user_fut.set_result(result)
+                    return
+                if is_text_file:
+                    data = data.decode()
+                await write_method(data)
+            self._transport.resume_reading()
+            self._copy_out_fut = self._loop.create_future()
+
+    def handle_copy_out_response(self,  msg_buf: memoryview) -> None:
+        if self.file_obj is None:
+            raise ValueError("File object is not set")
+        self._transport.pause_reading()
+        self._copy_out_data = deque()
+        self._copy_out_fut = self._loop.create_future()
+
+        # Because writing to the file is async, it can happen that the result
+        # future is set before the task is finished writing.
+        # Remove the future, the caller is waiting on and create
+        # a new one instead. The old one will be set with the result of the new
+        # one by the write task when it is finished.
+        user_fut = self._read_fut
+        if not user_fut.done():
+            self._read_fut = self._loop.create_future()
+        create_task(self.copy_out_task(user_fut))
 
     def handle_copy_in_response(self,  msg_buf: memoryview) -> None:
         """ Schedule the task to send copy messages """
@@ -60,7 +139,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # Sending copy messages is asynchronous. Because this callback function
         # is not synchronous, use a Task
         if self._read_fut is not None:
-            create_task(self.copy_in_response_task(msg_buf, self._read_fut))
+            create_task(self.copy_in_task(msg_buf, self._read_fut))
 
     async def _copy_in_run_and_check(
             self,
@@ -95,6 +174,8 @@ class _AsyncPGProtocol(_BasePGProtocol):
 
         if self._ex:
             # PostgreSQL has returned an Error
+            if coro_task not in done[0]:
+                coro_task.cancel()
             if self._extended_query:
                 # Extended query needs Sync message to receive Ready For Query
                 await self.write(b'S\x00\x00\x00\x04')
@@ -104,16 +185,16 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # Coroutine finished and no error received from server
         return True, coro_task.result()
 
-    async def _copy_in_response_task(self, read_fut: Awaitable[Any]) -> None:
+    async def _copy_in_task(self, read_fut: Awaitable[Any]) -> None:
         """ Stream a local file object to the server. """
 
         if self.file_obj is None:
             raise Exception("I can't")
 
         # If read method of file object is not awaitable, assume it is blocking
-        # run it using a threadpool. This is actually not true for a
+        # and run it using a threadpool. This is actually not true for a
         # BytesIO object for example, but better safe than sorry.
-        read_method = getattr(self.file_obj, "read")
+        read_method = getattr(self.file_obj, "read", None)
         if read_method is None:
             raise ValueError("Invalid input file, missing read method.")
 
@@ -147,13 +228,13 @@ class _AsyncPGProtocol(_BasePGProtocol):
             if not success:
                 break
 
-    async def copy_in_response_task(
+    async def copy_in_task(
             self,
             msg_buf: memoryview,  # pylint: disable=unused-argument
             read_fut: Awaitable[Any]) -> None:
         """ Asycnio Task coroutine to actually handle copy in response """
         try:
-            await self._copy_in_response_task(read_fut)
+            await self._copy_in_task(read_fut)
         except Exception as ex:  # pylint: disable=broad-except
             # Something went wrong when reading the file. Store exception and
             # notify server.
@@ -176,6 +257,17 @@ class _AsyncPGProtocol(_BasePGProtocol):
         self._status = _STATUS_CLOSED
         if exc is not None:
             self._set_exception(exc)
+            if self._close_fut is not None and not self._close_fut.done():
+                self._close_fut.set_exception(exc)
+        else:
+            if self._read_fut is not None and not self._read_fut.done():
+                if self._ex and self._ex.severity == Severity.FATAL:
+                    ex = self._ex
+                else:
+                    ex = InterfaceError("Connection is closed.")
+                self._read_fut.set_exception(ex)
+            if self._close_fut is not None and not self._close_fut.done():
+                self._close_fut.set_result(None)
 
     def pause_writing(self) -> None:
         """ Callback for transport """
@@ -248,21 +340,22 @@ class _AsyncPGProtocol(_BasePGProtocol):
             tz_name: Optional[str],
             password: Union[None, str, bytes],
             prepare_threshold: int,
+            options: Optional[Mapping[str, Optional[str]]],
             cache_size: int,
     ) -> None:
         """ Start up connection, including authentication """
         message = self._startup_message(
             user, database, application_name, tz_name, password,
-            prepare_threshold, cache_size)
+            options, prepare_threshold, cache_size)
         while isinstance(message, bytes):
             self._read_fut = self._loop.create_future()
             self._transport.write(message)
             message = await self._read_fut
 
-    def cancel(self, backend_key: Tuple[int, int]) -> None:
+    async def cancel(self, backend_key: Tuple[int, int]) -> None:
         """ Sends a Cancel Request message """
         self._transport.write(self.cancel_message(backend_key))
-        self._close()
+        await self._close()
 
     def __await__(self) -> Any:
         """ Wait until ReadyForQuery is sent """
@@ -313,18 +406,26 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 self._read_fut = self._loop.create_future()
             raise
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """ Closes the connection """
         if self._status == _STATUS_READY_FOR_QUERY:
             self._transport.write(self.terminate_message())
-        self._close()
+        await self._close()
 
-    def _close(self) -> None:
-        self._transport.close()
-        self._status = _STATUS_CLOSED
+    async def _close(self) -> None:
+        if not self._transport.is_closing():
+            if self._close_fut is None:
+                self._close_fut = self._loop.create_future()
+                self._transport.close()
+                self._status = _STATUS_CLOSING
+        if self._close_fut is not None:
+            await self._close_fut
 
     def _set_exception(self, ex: BaseException) -> None:
-        if self._read_fut and not self._read_fut.done():
+        if isinstance(ex, ServerError) and ex.severity == Severity.FATAL:
+            self._ex = ex
+            self._loop.create_task(self._close())
+        elif self._read_fut and not self._read_fut.done():
             self._read_fut.set_exception(ex)
 
     def _set_result(self, result: Any) -> None:

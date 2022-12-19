@@ -48,18 +48,6 @@ read_int_from_short(char **ptr, char *end) {
 }
 
 
-static void pack_uint4(char *ptr, uint32_t val) {
-    uint32_t nval;
-    nval = htobe32(val);
-    memcpy(ptr, &nval, 4);
-}
-
-
-static inline void pack_int4(char *ptr, int32_t val) {
-    pack_uint4(ptr, (uint32_t) val);
-}
-
-
 static PyObject *
 read_int_from_uint(char **ptr, char *end) {
     unsigned int val;
@@ -288,7 +276,9 @@ get_converters(unsigned int type_oid) {
             convert_pg_textarray_text, convert_pg_bpchararray_bin},
         chararray_converters[2] = {
             convert_pg_textarray_text, convert_pg_chararray_bin},
-        float4_converters[2] = {convert_pg_float_text, convert_pg_float4_bin},
+        xmlarray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_xmlarray_bin},
+        float4_converters[2] = {convert_pg_float4_text, convert_pg_float4_bin},
         float4array_converters[2] = {
             convert_pg_floatarray_text, convert_pg_float4array_bin},
         float8_converters[2] = {convert_pg_float_text, convert_pg_float8_bin},
@@ -297,26 +287,89 @@ get_converters(unsigned int type_oid) {
         int2_converters[2] = {convert_pg_int_text, convert_pg_int2_bin},
         int2array_converters[2] = {
             convert_pg_intarray_text, convert_pg_int2array_bin},
+        int2vector_converters[2] = {
+            convert_pg_intvector_text, convert_pg_int2array_bin},
+        int2vectorarray_converters[2] = {
+            convert_pg_intvectorarray_text, convert_pg_int2vectorarray_bin},
         int4_converters[2] = {convert_pg_int_text, convert_pg_int4_bin},
         int4array_converters[2] = {
             convert_pg_intarray_text, convert_pg_int4array_bin},
+        int4range_converters[2] = {
+            convert_pg_int4range_txt, convert_pg_int4range_bin},
+        int4rangearray_converters[2] = {
+            convert_pg_int4rangearray_text, convert_pg_int4rangearray_bin},
         int8_converters[2] = {convert_pg_int_text, convert_pg_int8_bin},
         int8array_converters[2] = {
             convert_pg_intarray_text, convert_pg_int8array_bin},
+        int8range_converters[2] = {
+            convert_pg_int8range_txt, convert_pg_int8range_bin},
+        int8rangearray_converters[2] = {
+            convert_pg_int8rangearray_text, convert_pg_int8rangearray_bin},
+
         uint4_converters[2] = {convert_pg_int_text, convert_pg_uint4_bin},
+        oidarray_converters[2] = {
+            convert_pg_intarray_text, convert_pg_oidarray_bin},
+        oidvector_converters[2] = {
+            convert_pg_intvector_text, convert_pg_oidarray_bin},
+        oidvectorarray_converters[2] = {
+            convert_pg_intvectorarray_text, convert_pg_oidvectorarray_bin},
+        xidarray_converters[2] = {
+            convert_pg_intarray_text, convert_pg_xidarray_bin},
+        cidarray_converters[2] = {
+            convert_pg_intarray_text, convert_pg_cidarray_bin},
+        regproc_converters[2] = {convert_pg_text, convert_pg_uint4_bin},
+        regprocarray_converters[2] = {
+            convert_pg_textarray_text, convert_pg_regprocarray_bin},
+        tid_converters[2] = {convert_pg_tid_txt, convert_pg_tid_bin},
+        tidarray_converters[2] = {
+            convert_pg_tidarray_txt, convert_pg_tidarray_bin},
+
         inet_converters[2] = {convert_pg_inet_text, convert_pg_inet_bin},
+        inetarray_converters[2] = {
+            convert_pg_inetarray_text, convert_pg_inetarray_bin},
         cidr_converters[2] = {convert_pg_cidr_text, convert_pg_cidr_bin},
+        cidrarray_converters[2] = {
+            convert_pg_cidrarray_text, convert_pg_cidrarray_bin},
         numeric_converters[2] = {
             convert_pg_numeric_text, convert_pg_numeric_bin},
+        numericarray_converters[2] = {
+            convert_pg_numericarray_text, convert_pg_numericarray_bin},
+        numrange_converters[2] = {
+            convert_pg_numrange_txt, convert_pg_numrange_bin},
+        numrangearray_converters[2] = {
+            convert_pg_numrangearray_txt, convert_pg_numrangearray_bin},
         bytea_converters[2] = {convert_pg_bytea_text, convert_pg_binary},
+        byteaarray_converters[2] = {
+            convert_pg_byteaarray_txt, convert_pg_byteaarray_bin},
         uuid_converters[2] = {convert_pg_uuid_text, convert_pg_uuid_bin},
+        uuidarray_converters[2] = {
+            convert_pg_uuidarray_text, convert_pg_uuidarray_bin},
         date_converters[2] = {convert_pg_date_text, convert_pg_date_bin},
+        daterange_converters[2] = {
+            convert_pg_daterange_txt, convert_pg_daterange_bin},
+        datearray_converters[2] = {
+            convert_pg_datearray_text, convert_pg_datearray_bin},
+        daterangearray_converters[2] = {
+            convert_pg_daterangearray_txt, convert_pg_daterangearray_bin},
         time_converters[2] = {convert_pg_time_text, convert_pg_time_bin},
+        timearray_converters[2] = {
+            convert_pg_timearray_text, convert_pg_timearray_bin},
         timetz_converters[2] = {convert_pg_timetz_txt, convert_pg_timetz_bin},
+        timetzarray_converters[2] = {
+            convert_pg_timetzarray_txt, convert_pg_timetzarray_bin},
         timestamp_converters[2] = {
             convert_pg_timestamp_text, convert_pg_timestamp_bin},
+        timestamparray_converters[2] = {
+            convert_pg_timestamparray_text, convert_pg_timestamparray_bin},
         timestamptz_converters[2] = {
             convert_pg_timestamptz_text, convert_pg_timestamptz_bin},
+        timestamptzarray_converters[2] = {
+            convert_pg_timestamptzarray_text, convert_pg_timestamptzarray_bin},
+        timestamptzrange_converters[2] = {
+            convert_pg_timestamptzrange_txt, convert_pg_timestamptzrange_bin},
+        timestamptzrangearray_converters[2] = {
+            convert_pg_timestamptzrangearray_txt,
+            convert_pg_timestamptzrangearray_bin},
         interval_converters[2] = {
             convert_pg_interval_text, convert_pg_interval_bin},
         intervalarray_converters[2] = {
@@ -325,6 +378,8 @@ get_converters(unsigned int type_oid) {
         jsonbarray_converters[2] = {
             convert_pg_jsonarray_txt, convert_pg_jsonbarray_bin},
         json_converters[2] = {convert_pg_json_txt, convert_pg_json_txt},
+        jsonarray_converters[2] = {
+            convert_pg_jsonarray_txt, convert_pg_jsonarray_bin},
         default_converters[2] = {convert_pg_text, convert_pg_binary};
 
     switch (type_oid) {
@@ -349,6 +404,8 @@ get_converters(unsigned int type_oid) {
         return bpchararray_converters;
     case CHARARRAYOID:
         return chararray_converters;
+    case XMLARRAYOID:
+        return xmlarray_converters;
     case FLOAT4OID:
         return float4_converters;
     case FLOAT4ARRAYOID:
@@ -361,46 +418,112 @@ get_converters(unsigned int type_oid) {
         return int2_converters;
     case INT2ARRAYOID:
         return int2array_converters;
+    case INT2VECTOROID:
+        return int2vector_converters;
+    case INT2VECTORARRAYOID:
+        return int2vectorarray_converters;
     case INT4OID:
         return int4_converters;
     case INT4ARRAYOID:
         return int4array_converters;
+    case INT4RANGEOID:
+        return int4range_converters;
+    case INT4RANGEARRAYOID:
+        return int4rangearray_converters;
     case INT8OID:
         return int8_converters;
     case INT8ARRAYOID:
         return int8array_converters;
+    case INT8RANGEOID:
+        return int8range_converters;
+    case INT8RANGEARRAYOID:
+        return int8rangearray_converters;
     case OIDOID:
+    case XIDOID:
+    case CIDOID:
         return uint4_converters;
+    case OIDARRAYOID:
+        return oidarray_converters;
+    case OIDVECTOROID:
+        return oidvector_converters;
+    case OIDVECTORARRAYOID:
+        return oidvectorarray_converters;
+    case XIDARRAYOID:
+        return xidarray_converters;
+    case CIDARRAYOID:
+        return cidarray_converters;
+    case REGPROCOID:
+        return regproc_converters;
+    case REGPROCARRAYOID:
+        return regprocarray_converters;
+    case TIDOID:
+        return tid_converters;
+    case TIDARRAYOID:
+        return tidarray_converters;
     case INETOID:
         return inet_converters;
+    case INETARRAYOID:
+        return inetarray_converters;
     case CIDROID:
         return cidr_converters;
+    case CIDRARRAYOID:
+        return cidrarray_converters;
     case NUMERICOID:
         return numeric_converters;
+    case NUMERICARRAYOID:
+        return numericarray_converters;
+    case NUMRANGEOID:
+        return numrange_converters;
+    case NUMRANGEARRAYOID:
+        return numrangearray_converters;
     case BYTEAOID:
         return bytea_converters;
+    case BYTEAARRAYOID:
+        return byteaarray_converters;
     case UUIDOID:
         return uuid_converters;
+    case UUIDARRAYOID:
+        return uuidarray_converters;
     case DATEOID:
         return date_converters;
+    case DATEARRAYOID:
+        return datearray_converters;
+    case DATERANGEOID:
+        return daterange_converters;
+    case DATERANGEARRAYOID:
+        return daterangearray_converters;
     case TIMEOID:
         return time_converters;
+    case TIMEARRAYOID:
+        return timearray_converters;
     case TIMETZOID:
         return timetz_converters;
+    case TIMETZARRAYOID:
+        return timetzarray_converters;
     case TIMESTAMPOID:
         return timestamp_converters;
+    case TIMESTAMPARRAYOID:
+        return timestamparray_converters;
     case TIMESTAMPTZOID:
         return timestamptz_converters;
+    case TIMESTAMPTZARRAYOID:
+        return timestamptzarray_converters;
+    case TSTZRANGEOID:
+        return timestamptzrange_converters;
+    case TSTZRANGEARRAYOID:
+        return timestamptzrangearray_converters;
     case INTERVALOID:
         return interval_converters;
     case INTERVALARRAYOID:
         return intervalarray_converters;
     case JSONBOID:
         return jsonb_converters;
-    case JSONOID:
-        return json_converters;
     case JSONBARRAYOID:
         return jsonbarray_converters;
+    case JSONOID:
+        return json_converters;
+    case JSONARRAYOID:
+        return jsonarray_converters;
     default:
         return default_converters;
     }
@@ -1104,6 +1227,9 @@ fill_param_info(
     else if (Py_TYPE(param) == (PyTypeObject *)DateTime) {
         ret = fill_datetime_info(param_info, &oid, &fmt, param);
     }
+    else if (Py_TYPE(param) == (PyTypeObject *)TimeDelta) {
+        ret = fill_interval_info(param_info, &oid, &fmt, param);
+    }
     else if (Py_TYPE(param) == (PyTypeObject *)UUID) {
         ret = fill_uuid_info(param_info, &oid, &fmt, param);
     }
@@ -1629,8 +1755,8 @@ error:
     for (int i = 0; i < num_parts; i++) {
         Py_DECREF(msg_parts[i]);
     }
-    Py_DECREF(message);
-    Py_DECREF(oid_bytes);
+    Py_XDECREF(message);
+    Py_XDECREF(oid_bytes);
     PyMem_Free(p_formats);
     if (param_info) {
         clean_param_info(param_info, PyTuple_GET_SIZE(params));

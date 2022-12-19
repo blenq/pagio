@@ -5,9 +5,24 @@ from decimal import Decimal
 from struct import Struct
 from typing import Tuple, Any, Generator, Union, List
 
-from . import const
-from .common import ushort_struct, Format, ProtocolError
+from .. import const
+from .array import PGArray, parse_unquoted
+from ..common import ushort_struct, Format, ProtocolError
+from ..const import (
+    INT4ARRAYOID, BOOLARRAYOID, NUMERICARRAYOID, NUMRANGEOID, FLOAT8ARRAYOID,
+    FLOAT4ARRAYOID,
+)
+from .conv_utils import simple_int
+from .range import DiscreteRange, BasePGRange
 from .text import default_to_pg
+
+
+INT16_MAX = 0x7FFF
+INT16_MIN = -0x8000
+INT32_MAX = 0x7FFFFFFF
+INT32_MIN = -0x80000000
+INT64_MAX = 0x7FFFFFFFFFFFFFFF
+INT64_MIN = -0x8000000000000000
 
 
 def get_struct_unpacker(fmt: str) -> Any:
@@ -15,7 +30,7 @@ def get_struct_unpacker(fmt: str) -> Any:
 
     _unpack = Struct(f"!{fmt}").unpack
 
-    def unpack_struct(buf: memoryview) -> Any:
+    def unpack_struct(conn, buf: memoryview) -> Any:
         return _unpack(buf)[0]
 
     return unpack_struct
@@ -31,11 +46,15 @@ bin_int8_to_python = get_struct_unpacker("q")
 
 def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
     """ Convert a Python int to a PG int parameter """
-    if -0x10000000 <= val <= 0x7FFFFFFF:
+    if INT32_MIN <= val <= INT32_MAX:
         return const.INT4OID, "i", val, 4, Format.BINARY
-    if -0x1000000000000000 <= val <= 0x7FFFFFFFFFFFFFFF:
+    if INT64_MIN <= val <= INT64_MAX:
         return const.INT8OID, "q", val, 8, Format.BINARY
     return default_to_pg(val)
+
+
+def txt_intvector_to_python(prot, buf: memoryview) -> List[int]:
+    return [int(v) for v in decode(buf).split(' ')]
 
 
 # ======== float ============================================================ #
@@ -46,13 +65,22 @@ def float_to_pg(val: float) -> Tuple[int, str, float, int, Format]:
     return const.FLOAT8OID, "d", val, 8, Format.BINARY
 
 
+def txt_float4_to_python(conn, buf: memoryview) -> float:
+    val = float(buf)
+
+    # force float4 to float8 conversion to get exactly the same value as the
+    # binary converter and the C extension values
+    bin_val = struct.pack("f", val)
+    return struct.unpack("f", bin_val)[0]
+
+
 bin_float4_to_python = get_struct_unpacker("f")
 bin_float8_to_python = get_struct_unpacker("d")
 
 # ======== numeric ========================================================== #
 
 
-def txt_numeric_to_python(buf: memoryview) -> Decimal:
+def txt_numeric_to_python(conn, buf: memoryview) -> Decimal:
     """ Converts a PG numeric text value to a Python Decimal """
     return Decimal(decode(buf))
 
@@ -65,7 +93,7 @@ NUMERIC_PINF = 0xD000
 NUMERIC_NINF = 0xF000
 
 
-def bin_numeric_to_python(buf: memoryview) -> Decimal:
+def bin_numeric_to_python(conn, buf: memoryview) -> Decimal:
     """ Converts a PG numeric binary value to a Python Decimal """
 
     npg_digits, weight, sign, _ = numeric_header.unpack_from(buf)
@@ -130,7 +158,7 @@ def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
         # pg_weight is 10000 based exponent of first pg_digit minus one
         q, r = divmod(len(digits) + exp, 4)
         pg_weight = q + bool(r) - 1
-        if pg_weight > 0x7FFF:
+        if pg_weight > INT16_MAX:
             # outside PG range
             return default_to_pg(val)
 
@@ -178,10 +206,19 @@ def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
     return const.NUMERICOID, f"{len_val}s", byte_val, len_val, Format.BINARY
 
 
+class PGNumRange(BasePGRange[Decimal]):
+    oid = NUMRANGEOID
+
+    def _type_check(self, val: Decimal) -> Decimal:
+        if not isinstance(val, Decimal):
+            return Decimal(val)
+        return val
+
+
 # ======== bool ============================================================= #
 
 
-def bin_bool_to_python(buf: memoryview) -> bool:
+def bin_bool_to_python(conn, buf: memoryview) -> bool:
     """ Converts PG binary bool value to Python bool. """
     if buf == b'\x01':
         return True
@@ -190,7 +227,7 @@ def bin_bool_to_python(buf: memoryview) -> bool:
     raise ProtocolError("Invalid value for bool")
 
 
-def text_bool_to_python(buf: memoryview) -> bool:
+def text_bool_to_python(conn, buf: memoryview) -> bool:
     """ Converts PG textual bool value to Python bool. """
     if buf == b't':
         return True
@@ -202,3 +239,82 @@ def text_bool_to_python(buf: memoryview) -> bool:
 def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
     """ Convert a Python bool to a PG bool parameter """
     return const.BOOLOID, "B", val, 1, Format.BINARY
+
+
+# ======== tid ============================================================== #
+
+left_parens = ord('(')
+comma = ord(',')
+right_parens = ord(')')
+
+
+def txt_tid_to_python(prot, buf: memoryview) -> Tuple[int, int]:
+    if buf[0] != left_parens:
+        raise ProtocolError("Invalid tid value.")
+    pos = 1
+    num1, new_pos = parse_unquoted(buf[pos:], [comma], prot, simple_int)
+    pos += new_pos
+    pos += 1
+    num2, new_pos = parse_unquoted(buf[pos:], [right_parens], prot, simple_int)
+    pos += new_pos
+    pos += 1
+    if pos != len(buf):
+        raise ProtocolError("Invalid tid value.")
+    return num1, num2
+
+
+tid_struct = struct.Struct("!LH")
+
+
+def bin_tid_to_python(prot, buf: memoryview) -> Tuple[int, int]:
+    return tid_struct.unpack(buf)
+
+
+# ======== arrays =========================================================== #
+
+
+class PGInt4Array(PGArray):
+    oid = INT4ARRAYOID
+
+
+class PGBoolArray(PGArray):
+    oid = BOOLARRAYOID
+
+
+class PGNumericArray(PGArray):
+    oid = NUMERICARRAYOID
+
+
+class PGFloat8Array(PGArray):
+    oid = FLOAT8ARRAYOID
+
+
+class PGFloat4Array(PGArray):
+    oid = FLOAT4ARRAYOID
+
+
+class PGIntRange(DiscreteRange[int]):
+
+    _min_value: int
+    _max_value: int
+
+    def increment(self, value: int) -> int:
+        return value + 1
+
+    def _type_check(self, val: int) -> int:
+        val = int(val)
+        if self._min_value <= val <= self._max_value:
+            return val
+        raise ValueError("Value out of range for int4 type.")
+
+
+class PGInt4Range(PGIntRange):
+
+    _min_value = INT32_MIN
+    _max_value = INT32_MAX
+
+
+class PGInt8Range(PGIntRange):
+
+    _min_value = INT64_MIN
+    _max_value = INT64_MAX

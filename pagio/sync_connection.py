@@ -3,7 +3,7 @@
 import socket
 from ssl import SSLContext
 from types import TracebackType
-from typing import Optional, Any, Type, Tuple
+from typing import Optional, Any, Type, Tuple, Mapping
 
 from .base_connection import BaseConnection, SSLMode
 from .base_protocol import TransactionStatus
@@ -32,13 +32,15 @@ class Connection(BaseConnection):
             local_addr: Optional[Tuple[str, int]] = None,
             server_hostname: Optional[str] = None,
             prepare_threshold: int = 5,
+            options: Optional[Mapping[str, Optional[str]]] = None,
             cache_size: int = 100,
     ) -> None:
         super().__init__(
             host, port, database, user, password, tz_name=tz_name,
             ssl_mode=ssl_mode, ssl=ssl, local_addr=local_addr,
             server_hostname=server_hostname,
-            prepare_threshold=prepare_threshold, cache_size=cache_size,
+            prepare_threshold=prepare_threshold, options=options,
+            cache_size=cache_size,
         )
         self._protocol: PGProtocol = self._connect(self._ssl_mode)
         self._notifications = NotificationQueue(self._protocol)
@@ -68,7 +70,8 @@ class Connection(BaseConnection):
             # login
             prot.startup(
                 self._user, self._database, "pagio", self._password,
-                self._tz_name, self._prepare_threshold, self._cache_size)
+                self._tz_name, self._prepare_threshold, self._options,
+                self._cache_size)
         except ServerError as ex:
             if ex.code == '28000' and ssl_mode == SSLMode.ALLOW:
                 # Exception might be caused by SSL being required. Retry with

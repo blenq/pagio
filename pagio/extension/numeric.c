@@ -1,6 +1,6 @@
 #include "numeric.h"
 #include "utils.h"
-#include "array.h"
+#include "complex.h"
 
 // ================ float ================================================== //
 
@@ -17,8 +17,9 @@ convert_pg_float_text(PPObject *self, char *buf, int len) {
     data[len] = '\0';
 	val = PyOS_string_to_double(data, &pend, PyExc_ValueError);
 	PyMem_Free(data);
-	if (val == -1.0 && PyErr_Occurred())
+	if (val == -1.0 && PyErr_Occurred()) {
 		return NULL;
+    }
 	if (pend != data + len) {
 		PyErr_SetString(PyExc_ValueError, "Invalid floating point value");
 		return NULL;
@@ -31,6 +32,29 @@ PyObject *
 convert_pg_floatarray_text(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_text(self, buf, len, ',', convert_pg_float_text);
+}
+
+
+PyObject *
+convert_pg_float4_text(PPObject *self, char *buf, int len) {
+    float val;
+    char *end, data[32];
+
+    if (len > 31) {
+		PyErr_SetString(PyExc_ValueError, "Invalid floating point value");
+		return NULL;
+    }
+    memcpy(data, buf, len);
+    data[len] = '\0';
+
+    errno = 0;
+    val = strtof(data, &end);
+    if (val == 0.0 || val == HUGE_VALF || val == -HUGE_VALF) {
+        if (errno) {
+            return PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+    return PyFloat_FromDouble(val);
 }
 
 
@@ -49,7 +73,7 @@ convert_pg_float_bin(
         return NULL;
 	}
 
-	val = unpack(buf, 0);
+	val = unpack(buf, PY_BIG_ENDIAN);
     if (val == -1.0 && PyErr_Occurred()) {
         return NULL;
     }
@@ -136,6 +160,56 @@ convert_pg_intarray_text(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_intvector_text(PPObject *self, char *buf, int len)
+{
+    PyObject *vec;
+    char item[11], *pos, *end;
+
+    pos = buf;
+    end = buf + len;
+    vec = PyList_New(0);
+    while (pos < end) {
+        PyObject *py_item;
+        char *item_end;
+        size_t item_len;
+
+        item_end = memchr(pos, ' ', end - pos);
+        if (item_end == NULL) {
+            item_end = buf + len;
+        }
+        item_len = item_end - pos;
+        if (item_len > 10) {
+            PyErr_SetString(PyExc_ValueError, "Invalid int vector value.");
+            Py_DECREF(vec);
+            return NULL;
+        }
+        memcpy(item, pos, item_len);
+        item[item_len] = 0;
+        py_item = PyLong_FromString(item, NULL, 10);
+        if (py_item == NULL) {
+            Py_DECREF(vec);
+            return NULL;
+        }
+        if (PyList_Append(vec, py_item) == -1) {
+            Py_DECREF(py_item);
+            Py_DECREF(vec);
+            return NULL;
+        }
+        pos += item_len + 1;
+    }
+    return vec;
+}
+
+
+PyObject *
+convert_pg_intvectorarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_intvector_text);
+}
+
+
+PyObject *
 convert_pg_int2_bin(PPObject *self, char *buf, int len) {
     if (len != 2) {
         PyErr_SetString(PyExc_ValueError, "Invalid int2 value");
@@ -149,6 +223,14 @@ PyObject *
 convert_pg_int2array_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_bin(self, buf, len, INT2OID, convert_pg_int2_bin);
+}
+
+
+PyObject *
+convert_pg_int2vectorarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, INT2VECTOROID, convert_pg_int2array_bin);
 }
 
 
@@ -176,6 +258,46 @@ convert_pg_uint4_bin(PPObject *self, char *buf, int len) {
         return NULL;
     }
     return PyLong_FromUnsignedLong(unpack_uint4(buf));
+}
+
+
+PyObject *
+convert_pg_oidarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, OIDOID, convert_pg_uint4_bin);
+}
+
+
+PyObject *
+convert_pg_oidvectorarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, OIDVECTOROID, convert_pg_oidarray_bin);
+}
+
+
+PyObject *
+convert_pg_xidarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, XIDOID, convert_pg_uint4_bin);
+}
+
+
+PyObject *
+convert_pg_cidarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, CIDOID, convert_pg_uint4_bin);
+}
+
+
+PyObject *
+convert_pg_regprocarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, REGPROCOID, convert_pg_uint4_bin);
 }
 
 
@@ -331,6 +453,14 @@ convert_pg_numeric_text(PPObject *self, char *buf, int len) {
     return PyObject_CallFunction(Decimal, "s#", buf, len);
 }
 
+
+PyObject *
+convert_pg_numericarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_numeric_text);
+}
+
+
 #define NUMERIC_NAN 0xC000
 #define NUMERIC_POS 0x0000
 #define NUMERIC_NEG 0x4000
@@ -354,8 +484,9 @@ numeric_set_digit(PyObject *digits, int idx, int val) {
 PyObject *
 convert_pg_numeric_bin(PPObject *self, char *buf, int len) {
 
-    unsigned short npg_digits, sign;
+    unsigned short npg_digits, ndigits, sign, dscale;
     short weight;
+    int exp;
     PyObject *digits, *ret = NULL;
 
     if (len < 8) {
@@ -372,8 +503,15 @@ convert_pg_numeric_bin(PPObject *self, char *buf, int len) {
     }
     weight = unpack_int2(buf + 2);
     sign = unpack_uint2(buf + 4);
-//    dscale = read_uint16(data + 6);
+    dscale = unpack_uint2(buf + 6);
     /* TODO check valid scale like postgres does */
+
+    exp = (weight + 1 - npg_digits) * 4;
+    ndigits = npg_digits * 4;
+    if (dscale && -exp > dscale) {
+        ndigits -= (-exp - dscale);
+        exp = -dscale;
+    }
 
     /* Check sign */
     if (sign == NUMERIC_NAN) {
@@ -394,37 +532,56 @@ convert_pg_numeric_bin(PPObject *self, char *buf, int len) {
         return NULL;
     }
 
-    digits = PyTuple_New(npg_digits * 4);
+    digits = PyTuple_New(ndigits);
     if (digits == NULL) {
     	return NULL;
     }
     buf += 8;
-    for (int i = 0; i < npg_digits; i++) {
-        unsigned int pg_digit;
 
-        pg_digit = unpack_uint2(buf + i * 2);
-        if (pg_digit > 9999) {
-            PyErr_SetString(PyExc_ValueError, "Invalid numeric value");
-            goto end;
+    unsigned short pg_digit = 0;
+
+    for (int i = 0; i < ndigits; i++) {
+        unsigned int dec_digit;
+
+        switch (i % 4) {
+        case 0:
+            pg_digit = unpack_uint2(buf);
+            buf += 2;
+            if (pg_digit > 9999) {
+                PyErr_SetString(PyExc_ValueError, "Invalid numeric value");
+                goto end;
+            }
+            dec_digit = pg_digit / 1000;
+            pg_digit = pg_digit % 1000;
+            break;
+        case 1:
+            dec_digit = pg_digit / 100;
+            pg_digit = pg_digit % 100;
+            break;
+        case 2:
+            dec_digit = pg_digit / 10;
+            pg_digit = pg_digit % 10;
+            break;
+        case 3:
+            dec_digit = pg_digit;
+            break;
         }
-        if (numeric_set_digit(digits, i * 4, pg_digit / 1000) == -1) {
-            goto end;
-        }
-        pg_digit = pg_digit % 1000;
-        if (numeric_set_digit(digits, i * 4 + 1, pg_digit / 100) == -1) {
-            goto end;
-        }
-        pg_digit = pg_digit % 100;
-        if (numeric_set_digit(digits, i * 4 + 2, pg_digit / 10) == -1 ||
-                numeric_set_digit(digits, i * 4 + 3, pg_digit % 10) == -1) {
+        if (numeric_set_digit(digits, i, dec_digit) == -1) {
             goto end;
         }
     }
-    ret = PyObject_CallFunction(
-        Decimal, "((HOi))", sign, digits, (weight + 1 - npg_digits) * 4);
+    ret = PyObject_CallFunction(Decimal, "((HOi))", sign, digits, exp);
 end:
     Py_DECREF(digits);
     return ret;
+}
+
+
+PyObject *
+convert_pg_numericarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, NUMERICOID, convert_pg_numeric_bin);
 }
 
 
@@ -683,22 +840,203 @@ fill_numeric_info(
 }
 
 
+// ================ tid ==================================================== //
+
+
+PyObject *
+convert_pg_tid_txt(PPObject *self, char *buf, int len)
+{
+    PyObject *tup, *item;
+    char *pos, *end;
+
+    if (len < 5 || buf[0] != '(')  {
+        PyErr_SetString(PyExc_ValueError, "Invalid tid value.");
+        return NULL;
+    }
+    tup = PyTuple_New(2);
+    if (tup == NULL) {
+        return NULL;
+    }
+    end = buf + len;
+    pos = buf + 1;
+    if (!(item = parse_unquoted(self, &pos, end, ",", convert_pg_int_text))) {
+        Py_DECREF(tup);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(tup, 0, item);
+    pos += 1;
+    if (!(item = parse_unquoted(self, &pos, end, ")", convert_pg_int_text))) {
+        Py_DECREF(tup);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(tup, 1, item);
+    pos += 1;
+    if (pos != end) {
+        Py_DECREF(tup);
+        PyErr_SetString(PyExc_ValueError, "Invalid tid value.");
+        return NULL;
+    }
+    return tup;
+}
+
+
+PyObject *
+convert_pg_tidarray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_tid_txt);
+}
+
+
+PyObject *
+convert_pg_tid_bin(PPObject *self, char *buf, int len)
+{
+    PyObject *tup, *item;
+    uint32_t num1;
+    uint16_t num2;
+
+    if (len != 6) {
+        PyErr_SetString(PyExc_ValueError, "Invalid tid value.");
+        return NULL;
+    }
+    num1 = unpack_uint4(buf);
+    num2 = unpack_uint2(buf + 4);
+
+    tup = PyTuple_New(2);
+    if (tup == NULL) {
+        return NULL;
+    }
+    if (!(item = PyLong_FromUnsignedLong(num1))) {
+        Py_DECREF(tup);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(tup, 0, item);
+    if (!(item = PyLong_FromLong(num2))) {
+        Py_DECREF(tup);
+        return NULL;
+    }
+    PyTuple_SET_ITEM(tup, 1, item);
+    return tup;
+}
+
+
+PyObject *
+convert_pg_tidarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, TIDOID, convert_pg_tid_bin);
+}
+
+
+// ================ ranges ================================================= //
+
+static PyObject *PGInt4Range;
+static PyObject *PGInt8Range;
+static PyObject *PGNumRange;
+
+PyObject *
+convert_pg_int4range_txt(PPObject *self, char *buf, int len) {
+    return parse_range_text(
+        self, buf, buf + len, convert_pg_int_text, PGInt4Range);
+}
+
+
+PyObject *
+convert_pg_int4range_bin(PPObject *self, char *buf, int len) {
+    return parse_range_binary(
+        self, buf, buf + len, convert_pg_int4_bin, PGInt4Range);
+}
+
+
+PyObject *
+convert_pg_int4rangearray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_int4range_txt);
+}
+
+
+PyObject *
+convert_pg_int4rangearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, INT4RANGEOID, convert_pg_int4range_bin);
+}
+
+
+PyObject *
+convert_pg_int8range_txt(PPObject *self, char *buf, int len) {
+    return parse_range_text(
+        self, buf, buf + len, convert_pg_int_text, PGInt8Range);
+}
+
+
+PyObject *
+convert_pg_int8range_bin(PPObject *self, char *buf, int len) {
+    return parse_range_binary(
+        self, buf, buf + len, convert_pg_int8_bin, PGInt8Range);
+}
+
+
+PyObject *
+convert_pg_int8rangearray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_int8range_txt);
+}
+
+
+PyObject *
+convert_pg_int8rangearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, INT8RANGEOID, convert_pg_int8range_bin);
+}
+
+
+PyObject *
+convert_pg_numrange_txt(PPObject *self, char *buf, int len) {
+    return parse_range_text(
+        self, buf, buf + len, convert_pg_numeric_text, PGNumRange);
+}
+
+
+PyObject *
+convert_pg_numrangearray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_numrange_txt);
+}
+
+
+PyObject *
+convert_pg_numrange_bin(PPObject *self, char *buf, int len) {
+    return parse_range_binary(
+        self, buf, buf + len, convert_pg_numeric_bin, PGNumRange);
+}
+
+
+PyObject *
+convert_pg_numrangearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, NUMRANGEOID, convert_pg_numrange_bin);
+}
+
+
 int
 init_numeric(void)
 {
-    PyObject *decimal_module;
+    PyObject *module;
 
-    decimal_module = PyImport_ImportModule("decimal");
-    if (decimal_module == NULL) {
+    module = PyImport_ImportModule("decimal");
+    if (module == NULL) {
         return -1;
     }
-
-    Decimal = PyObject_GetAttrString(decimal_module, "Decimal");
+    Decimal = PyObject_GetAttrString(module, "Decimal");
+    Py_DECREF(module);
     if (Decimal == NULL) {
-        Py_DECREF(decimal_module);
         return -1;
     }
-    Py_DECREF(decimal_module);
+
     is_nan = PyUnicode_InternFromString("is_nan");
     if (is_nan == NULL) {
         return -1;
@@ -715,5 +1053,18 @@ init_numeric(void)
     if (is_signed == NULL) {
         return -1;
     }
+
+    module = PyImport_ImportModule("pagio");
+    if (module == NULL) {
+        return -1;
+    }
+    PGInt4Range = PyObject_GetAttrString(module, "PGInt4Range");
+    PGInt8Range = PyObject_GetAttrString(module, "PGInt8Range");
+    PGNumRange = PyObject_GetAttrString(module, "PGNumRange");
+    Py_DECREF(module);
+    if (PGInt4Range == NULL || PGInt8Range == NULL || PGNumRange == NULL) {
+        return -1;
+    }
+
     return 0;
 }

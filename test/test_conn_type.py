@@ -8,8 +8,10 @@ from uuid import UUID, uuid4
 
 from pagio import (
     Connection, sync_connection, sync_protocol, Format, ServerError, PGJson,
-    ServerWarning,
+    ServerWarning, PGTextArray, PGInt4Range, PGInt8Range, PGText, PGNumRange,
+    PGTimestampTZRange, PGDateRange, PGRegConfig, ServerNotice,
 )
+from pagio.types import txt_hstore_to_python, bin_hstore_to_python
 from pagio.zoneinfo import ZoneInfo
 
 
@@ -30,13 +32,19 @@ class ConnTypeCase(unittest.TestCase):
         self.assertEqual(val, res[0][0])
 
     def test_concat_str(self):
-        self._test_val_result("SELECT CONCAT('hello', $1)", "hello@", "@")
+        self._test_val_result(
+            "SELECT CONCAT('hello', $1)", "hello@", PGText("@"))
 
     def test_ipv4_inet_result(self):
         self._test_val_result(
             "SELECT '192.168.0.1'::inet", IPv4Interface("192.168.0.1"))
         self._test_val_result(
             "SELECT '192.168.0.1/24'::inet", IPv4Interface("192.168.0.1/24"))
+
+    def test_inet_array_result(self):
+        self._test_val_result(
+            "SELECT '{192.168.0.1, ::1}'::inet[]",
+            [IPv4Interface("192.168.0.1"), IPv6Interface("::1")])
 
     def test_ipv4_inet_param(self):
         val = IPv4Interface("192.168.0.1")
@@ -68,6 +76,11 @@ class ConnTypeCase(unittest.TestCase):
     def test_ipv4_cidr_result(self):
         self._test_val_result(
             "SELECT '192.168.0.0/24'::cidr", IPv4Network("192.168.0.0/24"))
+
+    def test_ipv4_cidr_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['192.168.0.0/24']::cidr[]",
+            [IPv4Network("192.168.0.0/24")])
 
     def test_ipv4_cidr_param(self):
         val = IPv4Network('192.168.0.0/24')
@@ -129,6 +142,23 @@ class ConnTypeCase(unittest.TestCase):
             self._test_numeric_val(
                 "SELECT '-inf'::numeric", Decimal("-inf"))
 
+    def test_numeric_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['123.456', 'inf']::numeric[]",
+            [Decimal("123.456"), Decimal('inf')])
+
+    def test_numeric_range_result(self):
+        self._test_val_result(
+            "SELECT '[10,11)'::numrange;", PGNumRange(10, 11))
+        self._test_val_result(
+            "SELECT '[,)'::numrange;", PGNumRange(None, None))
+        self._test_val_result(
+            "SELECT 'empty'::numrange;", PGNumRange.empty())
+
+    def test_numeric_range_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['[10,11)']::numrange[];", [PGNumRange(10, 11)])
+
     def test_numeric_param(self):
         for val_str in [
             "12.34", "Infinity", "inf", "-infinity", "-inf", "1.234e123",
@@ -163,6 +193,11 @@ class ConnTypeCase(unittest.TestCase):
         self._cn.execute("SET bytea_output TO 'escape'")
         self._test_val_result("SELECT '\\x09686f695c'::bytea", b'\thoi\\')
 
+    def test_bytea_array_result(self):
+        self._cn.execute("SET bytea_output TO 'hex'")
+        self._test_val_result(
+            "SELECT ARRAY['\\x09686f695c']::bytea[]", [b'\thoi\\'])
+
     def test_bytea_param(self):
         val = b'\thoi\\'
         self._test_val_result("SELECT $1 -- no-cache 11", val, val)
@@ -171,6 +206,11 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT '42d36a04-8ff1-4337-870e-51de61b19771'::uuid",
             UUID('42d36a04-8ff1-4337-870e-51de61b19771'))
+
+    def test_uuid_param_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['42d36a04-8ff1-4337-870e-51de61b19771']::uuid[]",
+            [UUID('42d36a04-8ff1-4337-870e-51de61b19771')])
 
     def test_uuid_param(self):
         val = uuid4()
@@ -197,6 +237,21 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '2021-03-15'::date", result_format=Format.BINARY)
         self.assertEqual(date(2021, 3, 15), res[0][0])
 
+    def test_date_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['2021-03-15', '0900-03-15']::date[]",
+            [date(2021, 3, 15), date(900, 3, 15)])
+
+    def test_date_range_result(self):
+        self._test_val_result(
+            "SELECT '[0900-03-15, 2021-03-15]'::daterange",
+            PGDateRange(date(900, 3, 15), date(2021, 3, 15), "[]"))
+
+    def test_date_range_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['[0900-03-15, 2021-03-15]']::daterange[]",
+            [PGDateRange(date(900, 3, 15), date(2021, 3, 15), "[]")])
+
     def test_date_param(self):
         val = date(2021, 3, 15)
         self._test_val_result("SELECT $1 -- no-cache 14", val, val)
@@ -212,6 +267,9 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result("SELECT $1 -- no-cache 19", val, val)
 
     def test_timestamp_result(self):
+        self._test_val_result(
+            "SELECT '0900-03-15 14:10:03'::timestamp",
+            datetime(900, 3, 15, 14, 10, 3))
         self._test_val_result(
             "SELECT '2021-03-15 14:10:03'::timestamp",
             datetime(2021, 3, 15, 14, 10, 3))
@@ -230,9 +288,6 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT '2021-03-15 14:10:03.000002'::timestamp",
             datetime(2021, 3, 15, 14, 10, 3, 2))
-        self._test_val_result(
-            "SELECT '0900-03-15 14:10:03'::timestamp",
-            datetime(900, 3, 15, 14, 10, 3))
         self._test_val_result(
             "SELECT '20210-03-15 14:10:03'::timestamp",
             '20210-03-15 14:10:03')
@@ -261,6 +316,13 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result("SELECT $1 -- no-cache 19", val, val)
         val = datetime(2021, 3, 15, 14, 10, 3, 234)
         self._test_val_result("SELECT $1 -- no-cache 20", val, val)
+
+    def test_timestamp_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY["
+            "    '0900-03-15 14:10:03', '2021-03-15 14:10:03']::timestamp[]",
+            [datetime(900, 3, 15, 14, 10, 3), datetime(2021, 3, 15, 14, 10, 3)]
+        )
 
     def _test_tstz_val(self, sql, val):
         res = self._cn.execute(sql)
@@ -347,7 +409,42 @@ class ConnTypeCase(unittest.TestCase):
             datetime(2, 3, 15, 14, 10, 8, tzinfo=ZoneInfo("America/Chicago"))
         )
 
+    def test_timestamptz_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY["
+            "    '0900-03-15 14:10:03', '2021-03-15 14:10:03']::timestamptz[]",
+            [datetime(900, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo),
+             datetime(2021, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo)]
+        )
+
+    def test_timestamptz_range_result(self):
+        self._test_val_result(
+            "SELECT '[0900-03-15 14:10:03, 2021-03-15 14:10:03)'::tstzrange",
+            PGTimestampTZRange(
+                datetime(900, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo),
+                datetime(2021, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo)))
+
+    def test_timestamptz_range_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['[0900-03-15 14:10:03, 2021-03-15 14:10:03)']::tstzrange[]",
+            [PGTimestampTZRange(
+                datetime(900, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo),
+                datetime(2021, 3, 15, 14, 10, 3, tzinfo=self._cn.tzinfo))])
+
     def test_timestamptz_param(self):
+
+        self._cn.execute("SET TIMEZONE TO 'America/Chicago'")
+        res = self._cn.execute(
+            "SELECT $1::timestamptz -- no-cache 3", datetime.max, result_format=Format.BINARY)
+        db_val = res.rows[0][0]
+        db_val = db_val.replace(tzinfo=None)
+        self.assertEqual(datetime.max, db_val)
+        res = self._cn.execute(
+            "SELECT $1::timestamptz -- no-cache 4", datetime.max, result_format=Format.TEXT)
+        db_val = res.rows[0][0]
+        db_val = db_val.replace(tzinfo=None)
+        self.assertEqual(datetime.max, db_val)
+
         self._cn.execute("SET TIMEZONE TO 'Europe/Amsterdam'")
         val = datetime(2021, 3, 15, 14, 10, 3)
         res = self._cn.execute(
@@ -383,6 +480,10 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '13:12:34.23'::time", time(13, 12, 34, 230000))
         self._test_val_result("SELECT '24:00'::time", time(0))
 
+    def test_time_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['13:12', NULL]::time[]", [time(13, 12), None])
+
     def test_time_param(self):
         val = time(13, 12)
         self._test_val_result("SELECT $1 -- no-cache time", val, val)
@@ -403,6 +504,11 @@ class ConnTypeCase(unittest.TestCase):
             "SELECT '24:00:00-02:30:12'::timetz",
             time(0, tzinfo=timezone(
                 -1 * timedelta(hours=2, minutes=30, seconds=12))))
+
+    def test_timetz_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['13:12+01']::timetz[]",
+            [time(13, 12, tzinfo=timezone(timedelta(hours=1)))])
 
     def test_timetz_param(self):
         val = time(13, 12, tzinfo=timezone(timedelta(hours=2)))
@@ -504,6 +610,12 @@ class ConnTypeCase(unittest.TestCase):
             ['hi', None, 'h"o', 'h}o', 'h,o']
         )
 
+    def test_text_array_param(self):
+        val = ["hoi", "hi"]
+        self._test_val_result("SELECT $1", val, PGTextArray(val))
+        val = ["hoi", None]
+        self._test_val_result("SELECT $1", val, PGTextArray(val))
+
     def test_bool_array_result(self):
         self._test_val_result(
             "SELECT ARRAY['true', NULL, 'false']::bool[];",
@@ -518,7 +630,19 @@ class ConnTypeCase(unittest.TestCase):
 
     def test_notice_response(self):
         with self.assertWarns(ServerWarning):
+            # COMMIT without BEGIN returns a warning
             self._cn.execute("COMMIT")
+
+        self._cn.execute(
+            "CREATE TEMPORARY TABLE test1 (id int NOT NULL PRIMARY KEY);"
+            "CREATE TEMPORARY TABLE test2 ("
+            "   id int REFERENCES test1(id) ON DELETE CASCADE)"
+        )
+        with self.assertWarns(ServerNotice):
+            # TRUNCATE CASCADE returns a notice
+            self._cn.execute("TRUNCATE test1 CASCADE")
+
+        self._cn.execute("DROP TABLE test2; DROP TABLE test1")
 
     def test_interval_result(self):
         self._cn.execute("SET IntervalStyle TO postgres")
@@ -542,6 +666,12 @@ class ConnTypeCase(unittest.TestCase):
         #     "SELECT '2 year -1 month -3 days 04:05:06'::interval;",
         #     "+1-11 -3 +4:05:06")
 
+    def test_interval_param(self):
+        val = timedelta(days=2, seconds=13, milliseconds=300)
+        self._test_val_result("SELECT $1", (0, val), val)
+        val = -1 * val
+        self._test_val_result("SELECT $1", (0, val), val)
+
     def test_interval_array_result(self):
         self._cn.execute("SET IntervalStyle TO postgres")
         self._test_val_result(
@@ -554,6 +684,78 @@ class ConnTypeCase(unittest.TestCase):
     def test_xml_result(self):
         self._test_val_result(
             "SELECT '<hi>hello</hi>'::xml", "<hi>hello</hi>")
+
+    def test_xml_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['<hi>hello</hi>']::xml[]", ["<hi>hello</hi>"])
+
+    def test_int4_range_result(self):
+        self._test_val_result(
+            "SELECT '[10,11)'::int4range;", PGInt4Range(10, 11))
+        self._test_val_result(
+            "SELECT '[,)'::int4range;", PGInt4Range(None, None))
+        self._test_val_result(
+            "SELECT 'empty'::int4range;", PGInt4Range.empty())
+
+    def test_int4_range_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['[10, 2147483646]']::int4range[];",
+            [PGInt4Range(10, 2147483647)])
+
+    def test_int8_range_result(self):
+        self._test_val_result(
+            "SELECT '[10,11)'::int8range;", PGInt8Range(10, 11))
+        self._test_val_result(
+            "SELECT '[,)'::int8range;", PGInt8Range(None, None))
+        self._test_val_result(
+            "SELECT 'empty'::int8range;", PGInt8Range.empty())
+
+    def test_int8_range_array_result(self):
+        self._test_val_result(
+            "SELECT ARRAY['[10, 2147483646]']::int8range[];",
+            [PGInt8Range(10, 2147483647)])
+
+    def test_hstore_result(self):
+        res = self._cn.execute(
+            "SELECT EXISTS(SELECT datname FROM pg_database "
+            "WHERE datname='pagio_test');")
+        if not res[0][0]:
+            self._cn.execute("CREATE DATABASE pagio_test")
+        with Connection(database="pagio_test") as tcn:
+            tcn.execute("CREATE EXTENSION IF NOT EXISTS hstore")
+            res = tcn.execute(
+                "SELECT oid, typarray FROM pg_type WHERE typname = 'hstore';")
+            hstore_oid, hstore_array_oid = res[0]
+            tcn.register_res_converter(
+                hstore_oid, txt_hstore_to_python, bin_hstore_to_python,
+                hstore_array_oid)
+            res = tcn.execute(
+                'SELECT \'"hi"=>"wow", "hello"=>NULL, "last"=>"no"\'::hstore;',
+                result_format=Format.TEXT)
+            self.assertEqual(
+                res[0][0], {"hi": "wow", "hello": None, "last": "no"})
+            res = tcn.execute(
+                'SELECT \'"hi"=>"wow", "hello"=>NULL, "last"=>"no"\'::hstore;',
+                result_format=Format.BINARY)
+            self.assertEqual(
+                res[0][0], {"hi": "wow", "hello": None, "last": "no"})
+            tcn.execute("DROP EXTENSION hstore")
+        self._cn.execute("DROP DATABASE pagio_test")
+
+    def test_regconfig_result(self):
+        res = self._cn.execute(
+            "SELECT 'english'::regconfig", result_format=Format.TEXT)
+        self.assertEqual(res[0][0], 'english')
+
+    def test_regconfig_param(self):
+        res = self._cn.execute(
+            "SELECT $1", PGRegConfig("english"), result_format=Format.TEXT)
+        self.assertEqual(res[0][0], 'english')
+        res = self._cn.execute(
+            "SELECT to_tsvector($1::regconfig, "
+            "'a fat  cat sat on a mat - it ate a fat rats')",
+            PGRegConfig("english"), result_format=Format.TEXT)
+        self.assertEqual(res[0][0], "'ate':9 'cat':3 'fat':2,11 'mat':7 'rat':12 'sat':4")
 
 
 class PyConnTypeCase(ConnTypeCase):

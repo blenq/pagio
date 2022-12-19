@@ -46,6 +46,12 @@ class ResultCase(unittest.TestCase):
         res = self._cn.execute(
             "SELECT 1.5::float4, 1.5::float8", result_format=Format.BINARY)
         self.assertEqual(res[0], (1.5, 1.5))
+        res = self._cn.execute(
+            "SELECT '0.5555556'::float4", result_format=Format.BINARY)
+        self.assertEqual(res[0][0], 0.5555555820465088)
+        res = self._cn.execute(
+            "SELECT '0.5555556'::float4", result_format=Format.TEXT)
+        self.assertEqual(res[0][0], 0.5555555820465088)
 
     def test_select_float_param(self):
         res = self._cn.execute("SELECT $1", 1.5)

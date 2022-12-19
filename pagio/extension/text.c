@@ -1,5 +1,5 @@
 #include "text.h"
-#include "array.h"
+#include "complex.h"
 
 
 static unsigned char digit_vals[256] = {
@@ -105,6 +105,28 @@ convert_pg_bytea_text(PPObject *self, char *buf, int len)
     return bytes;
 }
 
+
+PyObject *
+convert_pg_byteaarray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_bytea_text);
+}
+
+
+PyObject *
+convert_pg_binary(PPObject *self, char *buf, int len)
+{
+    return PyBytes_FromStringAndSize(buf, len);
+}
+
+
+PyObject *
+convert_pg_byteaarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, BYTEAOID, convert_pg_binary);
+}
+
+
 int
 fill_bytes_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
@@ -158,4 +180,11 @@ PyObject *
 convert_pg_namearray_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_bin(self, buf, len, NAMEOID, convert_pg_text);
+}
+
+
+PyObject *
+convert_pg_xmlarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, XMLOID, convert_pg_text);
 }

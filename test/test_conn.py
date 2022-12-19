@@ -42,6 +42,7 @@ class ConnCase(unittest.TestCase):
         m = re.match(r"(\d+)\.(\d+)", version_str)
         self.assertEqual(
             cn.server_version, int(m.group(1)) * 10000 + int(m.group(2)))
+        cn.close()
 
     def test_simple_query(self):
         cn = Connection(database="postgres")
@@ -58,6 +59,10 @@ class ConnCase(unittest.TestCase):
         cn.close()
         cn.close()
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
+
+    def test_wrong_db(self):
+        with self.assertRaises(ServerError):
+            cn = Connection(database="postgress")
 
     def test_context(self):
         with Connection(database="postgres") as cn:
@@ -280,15 +285,16 @@ class ConnCase(unittest.TestCase):
             wr = weakref.ref(cn)
             gc.collect()
             self.assertIs(cn, wr())
+            cn.execute("SELECT 1")
         del cn
         gc.collect()
         self.assertIsNone(wr())
 
     def test_result_converter(self):
-        def conv_text(buf: memoryview) -> str:
+        def conv_text(conn, buf: memoryview) -> str:
             return decode(buf)
 
-        def conv_bin(buf: memoryview) -> str:
+        def conv_bin(conn, buf: memoryview) -> str:
             return decode(buf[1:])
 
         with Connection(database="postgres", prepare_threshold=1) as cn:
@@ -308,6 +314,13 @@ class ConnCase(unittest.TestCase):
                 "SELECT ARRAY['{\"key\": 3}']::jsonb[]",
                 result_format=Format.BINARY)
             self.assertEqual(res.rows[0][0], ['{"key": 3}'])
+
+    def test_conn_options(self):
+        with Connection(database="postgres", options={
+                "default_transaction_isolation": "serializable"}) as cn:
+            self.assertEqual(
+                cn.execute("SHOW default_transaction_isolation")[0][0],
+                "serializable")
 
 
 class PyConnCase(ConnCase):

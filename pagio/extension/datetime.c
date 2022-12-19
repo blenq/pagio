@@ -1,7 +1,7 @@
 #include "datetime.h"
 #include "protocol.h"
 #include "utils.h"
-#include "array.h"
+#include "complex.h"
 #include <datetime.h>
 
 #if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION < 10
@@ -15,10 +15,17 @@
 
 PyObject *Date;
 PyObject *DateTime;
+static PyObject *DateTimeMin;
+static PyObject *DateTimeMax;
 PyObject *Time;
+PyObject *TimeDelta;
 PyObject *ZoneInfo;
+static PyObject *PGDateRange;
+static PyObject *PGTimestampTZRange;
 
 static PyObject *astimezone;
+static PyObject *utcoffset;
+
 
 // ===== utils ================================================================
 
@@ -223,6 +230,28 @@ convert_pg_date_text(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_datearray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_date_text);
+}
+
+
+PyObject *
+convert_pg_daterange_txt(PPObject *self, char *buf, int len) {
+    return parse_range_text(
+        self, buf, buf + len, convert_pg_date_text, PGDateRange);
+}
+
+
+PyObject *
+convert_pg_daterangearray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_daterange_txt);
+}
+
+
+PyObject *
 convert_pg_time_text(PPObject *self, char *buf, int len)
 {
     // Text converter for PG time values
@@ -246,6 +275,13 @@ convert_pg_time_text(PPObject *self, char *buf, int len)
 
     // Create time
     return PyTime_FromTime(hour, minute, second, usec);
+}
+
+
+PyObject *
+convert_pg_timearray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_time_text);
 }
 
 
@@ -285,6 +321,13 @@ convert_pg_timetz_txt(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_timetzarray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(self, buf, len, ',', convert_pg_timetz_txt);
+}
+
+
+PyObject *
 convert_pg_timestamp_text(PPObject *self, char *buf, int len) {
 
     // Text converter for PG timestamp values
@@ -317,6 +360,14 @@ convert_pg_timestamp_text(PPObject *self, char *buf, int len) {
     // Create Python datetime
     return PyDateTime_FromDateAndTime(
         year, month, day, hour, minute, second, usec);
+}
+
+
+PyObject *
+convert_pg_timestamparray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_timestamp_text);
 }
 
 
@@ -367,6 +418,29 @@ convert_pg_timestamptz_text(PPObject *self, char *buf, int len)
         PyDateTimeAPI->DateTimeType);
     Py_DECREF(tz);
     return ts;
+}
+
+
+PyObject *
+convert_pg_timestamptzarray_text(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_timestamptz_text);
+}
+
+
+PyObject *
+convert_pg_timestamptzrange_txt(PPObject *self, char *buf, int len) {
+    return parse_range_text(
+        self, buf, buf + len, convert_pg_timestamptz_text, PGTimestampTZRange);
+}
+
+
+PyObject *
+convert_pg_timestamptzrangearray_txt(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_text(
+        self, buf, len, ',', convert_pg_timestamptzrange_txt);
 }
 
 
@@ -548,6 +622,12 @@ date_vals_from_int(int jd, int *year, int *month, int *day)
 #define USECS_PER_SEC       Py_LL(1000000)
 #define MAX_TZ_OFFSET_SECS  57600
 #define MIN_TZ_OFFSET_SECS  -57600
+#define DATE_OFFSET 730120
+#define MIN_PG_ORDINAL (1 - DATE_OFFSET)
+#define MAX_PG_ORDINAL (3652059 - DATE_OFFSET)  // 3652059 = datetime.date.max
+#define MIN_PG_TIMESTAMP (MIN_PG_ORDINAL * USECS_PER_DAY)
+#define MAX_PG_TIMESTAMP (MAX_PG_ORDINAL * USECS_PER_DAY + \
+    23 * USECS_PER_HOUR + 59 * USECS_PER_MINUTE + 59 * USECS_PER_SEC + 999999)
 
 
 static int
@@ -619,6 +699,28 @@ convert_pg_date_bin(PPObject *self, char *buf, int len) {
 
 
 PyObject *
+convert_pg_datearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, DATEOID, convert_pg_date_bin);
+}
+
+
+PyObject *
+convert_pg_daterange_bin(PPObject *self, char *buf, int len) {
+    return parse_range_binary(
+        self, buf, buf + len, convert_pg_date_bin, PGDateRange);
+}
+
+
+PyObject *
+convert_pg_daterangearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, DATERANGEOID, convert_pg_daterange_bin);
+}
+
+
+PyObject *
 convert_pg_time_bin(PPObject *self, char *buf, int len)
 {
     // Binary converter for PG time values
@@ -635,6 +737,13 @@ convert_pg_time_bin(PPObject *self, char *buf, int len)
         return NULL;
     }
     return PyTime_FromTime(hour, minute, second, usec);
+}
+
+
+PyObject *
+convert_pg_timearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(self, buf, len, TIMEOID, convert_pg_time_bin);
 }
 
 
@@ -667,11 +776,43 @@ convert_pg_timetz_bin(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_timetzarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, TIMETZOID, convert_pg_timetz_bin);
+}
+
+
+int
+datetime_vals_from_int(
+    int64_t val, int *year, int *month, int *day, int *hour, int *minute,
+    int *second, int *usec)
+{
+    int64_t time_val;
+    int32_t pg_ordinal;
+
+    // Split value into date and time parts
+    pg_ordinal = (int32_t)(val / USECS_PER_DAY);
+    time_val = val - pg_ordinal * USECS_PER_DAY;
+    if (time_val < 0) {
+        // compensate for negative time_val
+        time_val += USECS_PER_DAY;
+        pg_ordinal -= 1;
+    }
+
+    // Get date and time components
+    date_vals_from_int(pg_ordinal, year, month, day);
+    if (time_vals_from_int(time_val, hour, minute, second, usec) < 0)
+        return -1;
+    return 0;
+}
+
+PyObject *
 _convert_pg_timestamp_bin(PPObject *self, char *buf, int len, int use_tz) {
     // Convert a PG timestamp or timestamptz binary value to a python value
 
-    int64_t val, time_val;
-    int32_t pg_ordinal, year, month, day, hour, minute, second, usec;
+    int64_t val;
+    int32_t year, month, day, hour, minute, second, usec;
     char *bc_str, *tz_str, usec_str[8];
 
     if (len != 8) {
@@ -688,22 +829,13 @@ _convert_pg_timestamp_bin(PPObject *self, char *buf, int len, int use_tz) {
         return PyUnicode_FromString("-infinity");
     }
 
-    // Split value into date and time parts
-    pg_ordinal = (int32_t)(val / USECS_PER_DAY);
-    time_val = val - pg_ordinal * USECS_PER_DAY;
-    if (time_val < 0) {
-        // compensate for negative time_val
-        time_val += USECS_PER_DAY;
-        pg_ordinal -= 1;
-    }
+    if (val >= MIN_PG_TIMESTAMP && val <= MAX_PG_TIMESTAMP) {
 
-    // Get date and time components
-    date_vals_from_int(pg_ordinal, &year, &month, &day);
-    if (time_vals_from_int(time_val, &hour, &minute, &second, &usec) < 0)
-        return NULL;
+        if (datetime_vals_from_int(
+            val, &year, &month, &day, &hour, &minute, &second, &usec) == -1) {
+            return NULL;
+        }
 
-    if (year >= 1 && year <= 9999) {
-        // Within Python range
         if (use_tz) {
             // Timestamptz value, add timezone
             PyObject *utc_ts, *loc_ts;
@@ -739,8 +871,50 @@ _convert_pg_timestamp_bin(PPObject *self, char *buf, int len, int use_tz) {
                 year, month, day, hour, minute, second, usec);
         }
     }
+    if (use_tz && self->zone_info) {
+        // Try edge cases
+        PyObject *py_offset, *py_dt_to_use;
+        int64_t adj_val;
+
+        if (val < MIN_PG_TIMESTAMP) {
+            py_dt_to_use = DateTimeMin;
+        }
+        else {
+            py_dt_to_use = DateTimeMax;
+        }
+        py_offset = PyObject_CallMethodObjArgs(
+            self->zone_info, utcoffset, py_dt_to_use, NULL);
+
+        if (!PyDelta_Check(py_offset)) {
+            Py_DECREF(py_offset);
+            PyErr_SetString(
+                PyExc_ValueError,
+                "Timezone utc offset should return a timedelta value");
+            return NULL;
+        }
+        adj_val = val + (
+            PyDateTime_DELTA_GET_DAYS(py_offset) * USECS_PER_DAY +
+            (uint64_t)PyDateTime_DELTA_GET_SECONDS(py_offset) * USECS_PER_SEC +
+            PyDateTime_DELTA_GET_MICROSECONDS(py_offset));
+        Py_DECREF(py_offset);
+        if (adj_val >= MIN_PG_TIMESTAMP && adj_val <= MAX_PG_TIMESTAMP) {
+            if (datetime_vals_from_int(
+                    adj_val, &year, &month, &day, &hour, &minute, &second,
+                    &usec) == -1) {
+                return NULL;
+            }
+
+            return PyDateTimeAPI->DateTime_FromDateAndTime(
+                year, month, day, hour, minute, second, usec,
+                self->zone_info, PyDateTimeAPI->DateTimeType);
+        }
+    }
 
     // Value is outside Python range, create string similar to PG ISO format
+    if (datetime_vals_from_int(
+        val, &year, &month, &day, &hour, &minute, &second, &usec) == -1) {
+        return NULL;
+    }
 
     if (use_tz) {
         tz_str = "+00";
@@ -779,10 +953,42 @@ convert_pg_timestamp_bin(PPObject *self, char *buf, int len) {
 }
 
 
+
+PyObject *
+convert_pg_timestamparray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, TIMESTAMPOID, convert_pg_timestamp_bin);
+}
+
+
 PyObject *
 convert_pg_timestamptz_bin(PPObject *self, char *buf, int len)
 {
     return _convert_pg_timestamp_bin(self, buf, len, 1);
+}
+
+
+PyObject *
+convert_pg_timestamptzarray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, TIMESTAMPTZOID, convert_pg_timestamptz_bin);
+}
+
+
+PyObject *
+convert_pg_timestamptzrange_bin(PPObject *self, char *buf, int len) {
+    return parse_range_binary(
+        self, buf, buf + len, convert_pg_timestamptz_bin, PGTimestampTZRange);
+}
+
+
+PyObject *
+convert_pg_timestamptzrangearray_bin(PPObject *self, char *buf, int len)
+{
+    return convert_pg_array_bin(
+        self, buf, len, TSTZRANGEOID, convert_pg_timestamptzrange_bin);
 }
 
 
@@ -838,7 +1044,6 @@ convert_pg_intervalarray_bin(PPObject *self, char *buf, int len)
 // Converter functions for date/time parameters
 //
 
-#define DATE_OFFSET 730120
 
 static const int _days_before_month[] = {
     0, /* unused; this vector uses 1-based indexing */
@@ -888,7 +1093,6 @@ fill_date_info(
     return 0;
 }
 
-static PyObject *utcoffset;
 
 int
 fill_time_info(
@@ -971,6 +1175,29 @@ fill_time_info(
 }
 
 
+int
+fill_interval_info(
+    ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param)
+{
+    param_info->ptr = PyMem_Malloc(16);
+    if (param_info->ptr == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    param_info->flags = PARAM_NEEDS_FREE;
+    pack_int8(
+        (char *)param_info->ptr,
+        (int64_t)PyDateTime_DELTA_GET_SECONDS(param) * USECS_PER_SEC +
+            PyDateTime_DELTA_GET_MICROSECONDS(param));
+    pack_int4((char *)param_info->ptr + 8, PyDateTime_DELTA_GET_DAYS(param));
+    pack_int4((char *)param_info->ptr + 12, 0);
+    param_info->len = 16;
+    *p_fmt = 1;
+    *oid = INTERVALOID;
+    return 0;
+}
+
+
 void
 _fill_datetime_info(ParamInfo *param_info, PyObject *param)
 {
@@ -1029,6 +1256,14 @@ init_datetime(void) {
     Py_INCREF(Time);
     DateTime = (PyObject *)PyDateTimeAPI->DateTimeType;
     Py_INCREF(DateTime);
+    TimeDelta = (PyObject *)PyDateTimeAPI->DeltaType;
+    Py_INCREF(TimeDelta);
+
+    DateTimeMax = PyObject_GetAttrString(DateTime, "max");
+    DateTimeMin = PyObject_GetAttrString(DateTime, "min");
+    if (DateTimeMax == NULL || DateTimeMin == NULL) {
+        return -1;
+    }
 
     zoneinfo_module = PyImport_ImportModule("zoneinfo");
     if (zoneinfo_module == NULL && PyErr_ExceptionMatches(PyExc_ImportError)) {
@@ -1049,6 +1284,16 @@ init_datetime(void) {
     }
     utcoffset = PyUnicode_InternFromString("utcoffset");
     if (utcoffset == NULL) {
+        return -1;
+    }
+    PyObject *module = PyImport_ImportModule("pagio");
+    if (module == NULL) {
+        return -1;
+    }
+    PGTimestampTZRange = PyObject_GetAttrString(module, "PGTimestampTZRange");
+    PGDateRange = PyObject_GetAttrString(module, "PGDateRange");
+    Py_DECREF(module);
+    if (PGTimestampTZRange == NULL || PGDateRange == NULL) {
         return -1;
     }
     return 0;

@@ -3,7 +3,7 @@
 import asyncio
 from ssl import SSLContext
 from types import TracebackType
-from typing import Optional, Any, Generator, Type
+from typing import Optional, Any, Generator, Type, Mapping
 
 from .async_protocol import AsyncPGProtocol
 from .base_connection import BaseConnection, SSLMode
@@ -44,13 +44,15 @@ class AsyncConnection(BaseConnection):
             local_addr: Any = None,
             server_hostname: Optional[str] = None,
             prepare_threshold: int = 5,
+            options: Optional[Mapping[str, Optional[str]]] = None,
             cache_size: int = 100,
     ) -> None:
         super().__init__(
             host, port, database, user, password, tz_name=tz_name,
             ssl_mode=ssl_mode, ssl=ssl, local_addr=local_addr,
             server_hostname=server_hostname,
-            prepare_threshold=prepare_threshold, cache_size=cache_size,
+            prepare_threshold=prepare_threshold, options=options,
+            cache_size=cache_size,
         )
 
     def __await__(self) -> Generator[Any, None, 'AsyncConnection']:
@@ -86,7 +88,7 @@ class AsyncConnection(BaseConnection):
             await self._protocol.startup(
                 self._user, self._database, "pagio", self._tz_name,
                 self._password, prepare_threshold=self._prepare_threshold,
-                cache_size=self._cache_size)
+                options=self._options, cache_size=self._cache_size)
         except ServerError as ex:
             if ex.code == '28000' and ssl_mode == SSLMode.ALLOW:
                 # Exception might be caused by SSL being required. Retry with
@@ -113,8 +115,8 @@ class AsyncConnection(BaseConnection):
         # If existing connection is still executing, send Cancel Request on the
         # new connection with backend key info of the current connection
         if self.status is ProtocolStatus.EXECUTING:
-            prot.cancel(self._protocol.backend_key)
-        prot.close()
+            await prot.cancel(self._protocol.backend_key)
+        await prot.close()
 
     async def execute(
             self,
@@ -143,17 +145,17 @@ class AsyncConnection(BaseConnection):
                     self.close()
                 raise ex
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """ Closes the connection """
-        self._protocol.close()
+        await self._protocol.close()
 
-    def __enter__(self) -> 'AsyncConnection':
+    async def __aenter__(self) -> 'AsyncConnection':
         return self
 
-    def __exit__(
+    async def __aexit__(
             self,
             exc_type: Optional[Type[BaseException]],
             exc: Optional[BaseException],
             traceback: Optional[TracebackType],
             ) -> None:
-        self.close()
+        await self.close()

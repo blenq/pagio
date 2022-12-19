@@ -11,6 +11,7 @@ from types import MappingProxyType
 import os
 
 from .base_protocol import _BasePGProtocol, TransactionStatus, ProtocolStatus
+from .common import ResConverter
 from .zoneinfo import ZoneInfo
 
 HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
@@ -155,6 +156,7 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
             local_addr: Optional[Tuple[str, int]] = None,
             server_hostname: Optional[str] = None,
             prepare_threshold: int = 5,
+            options: Optional[Mapping[str, Optional[str]]],
             cache_size: int = 100,
             ) -> None:
 
@@ -185,6 +187,7 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         self._tz_name = tz_name
         self._local_addr = local_addr
         self._use_af_unix = use_af_unix
+        self._options = options
         prepare_threshold = int(prepare_threshold)
         if prepare_threshold < 0:
             raise ValueError("Negative value for prepare_threshold.")
@@ -272,8 +275,8 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
 
     def register_res_converter(
             self, type_oid: int,
-            txt_conv,
-            res_conv,
+            txt_conv: ResConverter,
+            res_conv: ResConverter,
             array_oid: int = 0,
             delim: str = ",",
     ) -> None:
