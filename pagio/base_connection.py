@@ -1,18 +1,18 @@
 """ Base connection functionality """
 
+from datetime import tzinfo
 from enum import Enum, auto
 import getpass
 from pathlib import Path
 import re
 import socket
 from ssl import SSLContext
-from typing import Optional, Tuple, Union, Mapping
+from typing import Any, Optional, Tuple, Union, Mapping
 from types import MappingProxyType
 import os
 
 from .base_protocol import _BasePGProtocol, TransactionStatus, ProtocolStatus
-from .common import ResConverter
-from .zoneinfo import ZoneInfo
+from .types import ResConverter
 
 HAS_AF_UNIX = hasattr(socket, "AF_UNIX")
 
@@ -49,7 +49,7 @@ def _get_host(host: Optional[str], port: int) -> str:
     if host is not None:
         return host
     if HAS_AF_UNIX:
-        for dir_name in ['/var/run/postgresql', '/tmp']:
+        for dir_name in ('/var/run/postgresql', '/tmp'):
             if os.path.exists(f"{dir_name}/.s.PGSQL.{port}"):
                 return dir_name
     return 'localhost'
@@ -238,7 +238,7 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         return self._protocol.status
 
     @property
-    def tzinfo(self) -> Optional[ZoneInfo]:
+    def tzinfo(self) -> Optional[tzinfo]:
         """ Session timezone """
         if self._protocol is None:
             return None
@@ -266,19 +266,27 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         return self._server_parameters
 
     @property
-    def server_version(self):
+    def server_version(self) -> int:
+        """ Returns the server version as an integer.
+
+        Can be used for comparisons.
+
+        """
         if self._protocol is None:
             raise ValueError("Connection not established")
         version_str = self._protocol.server_parameters["server_version"]
-        m = re.match(r"(\d+)\.(\d+)", version_str)
-        return int(m.group(1)) * 10000 + int(m.group(2))
+        match = re.match(r"(\d+)\.(\d+)", version_str)
+        if match is None:
+            raise ValueError("Can not parse server version string.")
+        return int(match.group(1)) * 10000 + int(match.group(2))
 
     def register_res_converter(
             self, type_oid: int,
-            txt_conv: ResConverter,
-            res_conv: ResConverter,
+            txt_conv: ResConverter[Any],
+            res_conv: ResConverter[Any],
             array_oid: int = 0,
             delim: str = ",",
     ) -> None:
-        self._protocol.register_res_converter(
+        """ Register a converter for a PG type. """
+        self._protocol.register_res_converter(  # type: ignore
             type_oid, txt_conv, res_conv, array_oid, delim)

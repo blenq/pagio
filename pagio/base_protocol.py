@@ -3,25 +3,28 @@
 from abc import abstractmethod, ABC
 from codecs import decode
 from collections import OrderedDict
+from datetime import tzinfo
 import enum
 from hashlib import md5
 from itertools import repeat
-from struct import Struct, unpack_from, pack
+from struct import Struct, pack
 import sys
 from typing import (
     Optional, Union, Dict, Callable, List, Any, Tuple, cast, Generator,
-    Type, OrderedDict as TypingOrderedDict, Iterable)
+    Type, OrderedDict as TypingOrderedDict, Iterable, Mapping)
 import warnings
 
 from .pgscramp import PGScrampClient
 
-from .types import default_res_converters, res_converters, param_converters
+from .types import (
+    default_res_converters, res_converters, param_converters, ResConverter)
 from .types.array import ArrayConverter, BinArrayConverter
 from .common import (
     ProtocolError, Severity, _error_fields, ServerError, InvalidOperationError,
     FieldInfo, CachedQueryExpired, check_length_equal,
-    ushort_struct, Format, StatementDoesNotExist, CopyFile,
-    Notification, ResConverter, error_classes, ServerWarning, ServerNotice,
+    Format, StatementDoesNotExist, CopyFile,
+    Notification, error_classes, ServerWarning, ServerNotice, int_from_bytes,
+    uint_from_bytes, int4_to_bytes,
 )
 from .types import text
 from .zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -31,15 +34,12 @@ if sys.version_info >= (3, 8):
 else:
     from typing_extensions import TypedDict
 
-warnings.filterwarnings("ignore", category=ServerNotice)
+warnings.filterwarnings("ignore", category=ServerNotice, append=True)
 
 STANDARD_BUF_SIZE = 0x4000
 
 
-msg_header_struct = Struct("!Bi")
-int_struct = Struct('!i')
 field_desc_struct = Struct("!IhIhih")
-intint_struct = Struct('!ii')
 
 
 _STATUS_CLOSED = 0
@@ -80,7 +80,10 @@ class _AbstractPGProtocol(ABC):
     _extended_query: bool
     _ex: Optional[Exception]
     file_obj: Optional[CopyFile]
-    _custom_res_converters: Dict
+    _custom_res_converters: Dict[int, Tuple[ResConverter[Any], ResConverter[Any]]]
+    _tzinfo: Optional[tzinfo]
+    _iso_dates: bool
+    _interval_style: Optional[str]
 
     @abstractmethod
     def _set_result(self, result: Any) -> None:
@@ -88,10 +91,6 @@ class _AbstractPGProtocol(ABC):
 
     @abstractmethod
     def _set_exception(self, ex: BaseException) -> None:
-        ...
-
-    @abstractmethod
-    def _close(self) -> None:
         ...
 
     @abstractmethod
@@ -149,6 +148,44 @@ class _AbstractPGProtocol(ABC):
 CANCEL_REQUEST_CODE = 80877102
 
 
+def _get_ex_val(messages: Dict[str, str], key: str) -> str:
+    try:
+        return messages.pop(key)
+    except KeyError:
+        # pylint: disable-next=raise-missing-from
+        raise ProtocolError(f"Missing key '{key}' in Error Response.")
+
+
+def _error_args(buf: memoryview) -> List[Any]:
+    # format: "({error_field_code:char}{error_field_value}\0)+\0"
+    if buf[-2:] != b'\0\0':
+        raise ProtocolError("Invalid Error Response")
+    messages = {msg[:1]: msg[1:] for msg in decode(buf[:-2]).split('\0')}
+    ex_args: List[Union[Severity, str, int, None]] = [None] * 17
+
+    _get_ex_val(messages, 'S')
+    ex_args[0] = Severity(_get_ex_val(messages, 'V'))
+
+    value: Union[int, str]
+    for k, value in messages.items():
+        if k in ('p', 'P', 'L'):
+            try:
+                value = int(value)
+            except ValueError:
+                pass
+        try:
+            idx = _error_fields[k]
+        except KeyError:
+            continue
+        ex_args[idx] = value
+
+    if ex_args[1] is None:
+        raise ProtocolError("Missing code in Error Response")
+    if ex_args[2] is None:
+        raise ProtocolError("Missing message in Error Response")
+    return ex_args
+
+
 # pylint: disable-next=too-many-instance-attributes
 class _BasePGProtocol(_AbstractPGProtocol):
     """ Common functionality for pure python and c accelerated versions of
@@ -158,7 +195,6 @@ class _BasePGProtocol(_AbstractPGProtocol):
     _transaction_status: int
     _status: int
     _server_parameters: Dict[str, str]
-    _tzinfo: Optional[ZoneInfo]
 
     def __init__(self) -> None:
         self._handlers: Dict[int, Callable[[memoryview], None]] = {
@@ -184,8 +220,8 @@ class _BasePGProtocol(_AbstractPGProtocol):
     def register_res_converter(
             self,
             type_oid: int,
-            txt_conv: ResConverter,
-            res_conv: ResConverter,
+            txt_conv: ResConverter[Any],
+            res_conv: ResConverter[Any],
             array_oid: int,
             delim: str
     ) -> None:
@@ -220,7 +256,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
         return ProtocolStatus(self._status)
 
     @property
-    def tzinfo(self) -> Union[None, ZoneInfo]:
+    def tzinfo(self) -> Union[None, tzinfo]:
         """ Session timezone """
         return self._tzinfo
 
@@ -239,7 +275,7 @@ class _BasePGProtocol(_AbstractPGProtocol):
             self, user: Union[str, bytes], database: Optional[str],
             application_name: Optional[str], tz_name: Optional[str],
             password: Union[None, str, bytes],
-            options: Optional[Dict[str, Optional[str]]],
+            options: Optional[Mapping[str, Optional[Union[str, bytes]]]],
             prepare_threshold: int, cache_size: int,
     ) -> bytes:
         parameters = []
@@ -288,7 +324,8 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
     def cancel_message(self, backend_key: Tuple[int, int]) -> bytes:
         """ Returns a Cancel Request message. """
-        return pack("!iiii", 16, CANCEL_REQUEST_CODE, *backend_key)
+        return b''.join(int4_to_bytes(val) for val in (
+            16, CANCEL_REQUEST_CODE, *backend_key))
 
     def terminate_message(self) -> bytes:
         """ Gets a terminate client message. """
@@ -306,46 +343,10 @@ class _BasePGProtocol(_AbstractPGProtocol):
         else:
             raise ProtocolError("Unexpected response from server")
 
-    def _get_ex_val(self, messages: Dict[str, str], key: str) -> str:
-        try:
-            return messages.pop(key)
-        except KeyError:
-            # pylint: disable-next=raise-missing-from
-            raise ProtocolError(f"Missing key '{key}' in Error Response.")
-
-    def _error_args(self, buf: memoryview) -> List[Any]:
-        # format: "({error_field_code:char}{error_field_value}\0)+\0"
-        if buf[-2:] != b'\0\0':
-            raise ProtocolError("Invalid Error Response")
-        messages = {msg[:1]: msg[1:] for msg in decode(buf[:-2]).split('\0')}
-        ex_args: List[Union[Severity, str, int, None]] = [None] * 17
-
-        self._get_ex_val(messages, 'S')
-        ex_args[0] = Severity(self._get_ex_val(messages, 'V'))
-
-        value: Union[int, str]
-        for k, value in messages.items():
-            if k in ('p', 'P', 'L'):
-                try:
-                    value = int(value)
-                except ValueError:
-                    pass
-            try:
-                idx = _error_fields[k]
-            except KeyError:
-                continue
-            ex_args[idx] = value
-
-        if ex_args[1] is None:
-            raise ProtocolError("Missing code in Error Response")
-        if ex_args[2] is None:
-            raise ProtocolError("Missing message in Error Response")
-        return ex_args
-
     def handle_error(self, buf: memoryview) -> None:
         """ Interprets and sets a server error. """
 
-        ex_args = self._error_args(buf)
+        ex_args = _error_args(buf)
 
         if ex_args[16] == "RevalidateCachedQuery":
             # recognize this particular error, to easily handle retry
@@ -366,11 +367,11 @@ class _BasePGProtocol(_AbstractPGProtocol):
             self._ex = exc
 
     def handle_notice_response(self, buf: memoryview) -> None:
-        ex_args = self._error_args(buf)
-        if ex_args[0] is Severity.NOTICE:
-            ex_class = ServerNotice
+        ex_args = _error_args(buf)
+        if ex_args[0] is Severity.WARNING:
+            ex_class: Type[Warning] = ServerWarning
         else:
-            ex_class = ServerWarning
+            ex_class = ServerNotice
         warnings.warn(ex_class(*ex_args))
 
     def _handle_md5_auth_req(self, msg_buf: memoryview) -> None:
@@ -379,19 +380,17 @@ class _BasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Missing password")
         if self.user is None:
             raise ProtocolError("Missing user")
-        [salt] = unpack_from("4s", msg_buf, 4)
+        salt = bytes(msg_buf[4:8])
         pw_hash = (b'md5' + md5(md5(
             self.password + self.user
         ).hexdigest().encode() + salt).hexdigest().encode())
 
-        pw_len = len(pw_hash) + 1
-        struct_fmt = f'!ci{pw_len}s'
-        self._set_result(
-            pack(struct_fmt, b'p', pw_len + 4, pw_hash))
+        self._set_result(b''.join(
+            (b'p', int4_to_bytes(len(pw_hash) + 5), pw_hash, b'\0')))
 
     def handle_auth_req(self, msg_buf: memoryview) -> None:
         """ Handles authentication messages """
-        [specifier] = int_struct.unpack_from(msg_buf)
+        specifier = int_from_bytes(msg_buf[:4])
         if specifier == 0:
             check_length_equal(4, msg_buf)
         elif specifier == 5:
@@ -440,13 +439,16 @@ class _BasePGProtocol(_AbstractPGProtocol):
 
     def handle_backend_key_data(self, msg_buf: memoryview) -> None:
         """ Handles the backend key """
-        self._backend = cast(Tuple[int, int], intint_struct.unpack(msg_buf))
+        if len(msg_buf) != 8:
+            raise ProtocolError("Invalid backend key data.")
+        self._backend = (
+            int_from_bytes(msg_buf[:4]), int_from_bytes(msg_buf[4:]))
 
     def handle_notification_response(self, msg_buf: memoryview) -> None:
         """ Handles a notification """
         if len(msg_buf) < 6 or msg_buf[-1] != 0:
             raise ProtocolError("Invalid notification reponse")
-        [process_id] = int_struct.unpack_from(msg_buf)
+        process_id = int_from_bytes(msg_buf[:4])
         value = decode(msg_buf[4:-1])
         parts = value.split('\0')
         if len(parts) != 2:
@@ -468,7 +470,7 @@ class Statement(TypedDict):
     prepared: bool
     num_executed: int
     res_fields: Optional[Tuple[FieldInfo, ...]]
-    res_converters: Optional[List[Tuple[ResConverter, ResConverter]]]
+    res_converters: Optional[List[Tuple[ResConverter[Any], ResConverter[Any]]]]
     name: bytes
 
 
@@ -500,7 +502,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self.res_rows: Optional[List[Tuple[Any, ...]]] = None
         self.res_fields: Optional[Tuple[FieldInfo, ...]] = None
         self.res_converters: Optional[
-            List[Tuple[ResConverter, ResConverter]]] = None
+            List[Tuple[ResConverter[Any], ResConverter[Any]]]] = None
         self._result_format = Format.DEFAULT
         self._raw_result = False
         self._extended_query = False
@@ -519,7 +521,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         self._transaction_status = 0
         self._server_parameters: Dict[str, str] = {}
         self._iso_dates = False
-        self._tzinfo: Optional[ZoneInfo] = None
+        self._tzinfo = None
 
         super().__init__(*args)
         self._handlers.update({
@@ -535,7 +537,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
                 ('Z', self.handle_ready_for_query),
             ]})
         self._custom_res_converters = {}
-        self._interval_style = None
+        self._interval_style: Optional[str] = None
 
     def get_buffer(self, sizehint: int) -> memoryview:
         """ Gets a buffer to receive data into. """
@@ -556,8 +558,9 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             # read in two stages, first header, then content
             if self._identifier is None:
                 # read header
-                self._identifier, msg_len = msg_header_struct.unpack_from(
-                    self._standard_buf, msg_start)
+                self._identifier = self._standard_buf[msg_start]
+                msg_len = int_from_bytes(
+                    self._standard_buf[msg_start + 1:msg_start + 5])
 
                 # msg_len includes msg_len itself, so subtract 4
                 msg_part_len = msg_len - 4
@@ -808,8 +811,8 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         """ Handles a Row Description message. """
         buffer = bytes(msg_buf)
         res_fields = []
-        converters: List[Tuple[ResConverter, ResConverter]] = []
-        [num_fields] = ushort_struct.unpack_from(msg_buf)
+        converters: List[Tuple[ResConverter[Any], ResConverter[Any]]] = []
+        num_fields = uint_from_bytes(msg_buf[:2])
 
         offset = 2
         for _ in range(num_fields):
@@ -828,7 +831,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             convs = self._custom_res_converters.get(type_oid)
             if convs is None:
                 convs = res_converters.get(type_oid, default_res_converters)
-            converters.append(convs)
+            converters.append(convs)  # type: ignore
             offset += field_desc_struct.size
         if offset != len(msg_buf):
             raise ProtocolError("Additional data after row description")
@@ -846,10 +849,10 @@ class PyBasePGProtocol(_AbstractPGProtocol):
             raise ProtocolError("Unexpected data row.")
 
         num_converters = len(self.res_converters)
-        if ushort_struct.unpack_from(buf)[0] != num_converters:
+        if uint_from_bytes(buf[:2]) != num_converters:
             raise ProtocolError("Invalid number of row values")
 
-        res_converters: Iterable[Callable[[memoryview], Any]]
+        res_converters: Iterable[ResConverter[Any]]
         if self._raw_result:
             res_converters = repeat(
                 default_res_converters[self._result_format], num_converters)
@@ -860,7 +863,7 @@ class PyBasePGProtocol(_AbstractPGProtocol):
         def get_vals() -> Generator[Any, None, None]:
             offset = 2
             for converter in res_converters:
-                [val_len] = int_struct.unpack_from(buf, offset)
+                val_len = int_from_bytes(buf[offset:offset + 4])
                 offset += 4
                 if val_len == -1:
                     yield None

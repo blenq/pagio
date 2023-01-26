@@ -31,6 +31,7 @@ Notable features:
   performance critical processing implemented in a C extension.
 * Supports the :external+py3:py:class:`asyncio.ProactorEventLoop`, for best
   compatibility with Windows.
+* No dependencies on libpq
 
 Index
 -----

@@ -45,7 +45,7 @@ class PGScrampClient:
     # implementation is monkey patched (yes... ugly) to cope with raw binary
     # values.
     #
-    # Note: This is not criticism on the scramp library being used. It follows
+    # Note: This is no criticism on the scramp library being used. It follows
     # standards as it should. PostgreSQL needs to deal with legacy and I am too
     # lazy to build a special SASL client myself, when a fully functional
     # lib already exists.

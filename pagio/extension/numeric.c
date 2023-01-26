@@ -54,13 +54,16 @@ convert_pg_float4_text(PPObject *self, char *buf, int len) {
             return PyErr_SetFromErrno(PyExc_OSError);
         }
     }
+    if (end != data + len) {
+		PyErr_SetString(PyExc_ValueError, "Invalid floating point value");
+		return NULL;
+    }
     return PyFloat_FromDouble(val);
 }
 
 
 static PyObject *
 convert_pg_float_bin(
-    PPObject *self,
     char *buf,
     int len,
     int required_len,
@@ -73,8 +76,8 @@ convert_pg_float_bin(
         return NULL;
 	}
 
-	val = unpack(buf, PY_BIG_ENDIAN);
-    if (val == -1.0 && PyErr_Occurred()) {
+	val = unpack(buf, 0);
+	if (val == -1.0 && PyErr_Occurred()) {
         return NULL;
     }
 	return PyFloat_FromDouble(val);
@@ -84,7 +87,7 @@ convert_pg_float_bin(
 PyObject *
 convert_pg_float4_bin(PPObject *self, char *buf, int len)
 {
-    return convert_pg_float_bin(self, buf, len, 4, PyFloat_Unpack4);
+    return convert_pg_float_bin(buf, len, 4, PyFloat_Unpack4);
 }
 
 
@@ -99,7 +102,7 @@ convert_pg_float4array_bin(PPObject *self, char *buf, int len)
 PyObject *
 convert_pg_float8_bin(PPObject *self, char *buf, int len)
 {
-    return convert_pg_float_bin(self, buf, len, 8, PyFloat_Unpack8);
+    return convert_pg_float_bin(buf, len, 8, PyFloat_Unpack8);
 }
 
 
@@ -134,15 +137,20 @@ fill_float_info(
 PyObject *
 convert_pg_int_text(PPObject *self, char *buf, int len)
 {
-    char data[len + 1];
+    char data[21];
     PyObject *val;
 	char *pend;
 
+    if (len > 20) {
+		PyErr_SetString(PyExc_ValueError, "Invalid integer value.");
+		return NULL;
+    }
     memcpy(data, buf, len);
     data[len] = 0;
     val = PyLong_FromString(data, &pend, 10);
-	if (val == NULL)
+	if (val == NULL) {
 		return NULL;
+    }
 	if (pend != data + len) {
 	    Py_DECREF(val);
 		PyErr_SetString(PyExc_ValueError, "Invalid integer value");

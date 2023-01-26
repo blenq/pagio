@@ -23,6 +23,11 @@ class ConnTypeCase(unittest.TestCase):
     def tearDown(self) -> None:
         self._cn.close()
 
+    def test_varchar_create(self):
+        self._cn.execute("CREATE TEMPORARY TABLE yo (m VARCHAR(10))")
+        self._cn.execute("INSERT INTO yo VALUES ($1)", "")
+        self.assertEqual(self._cn.execute("SELECT * FROM yo")[0][0], "")
+
     def _test_val_result(self, sql, val, *params):
         res = self._cn.execute(sql, *params)
         self.assertEqual(val, res[0][0])

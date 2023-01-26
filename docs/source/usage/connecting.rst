@@ -39,7 +39,8 @@ socket is not found or available, a TCP connection is attempted to 'localhost'.
 
 The use of Unix domain sockets can be enforced by providing the socket
 directory as an absolute path, for example "/var/run/postgresql". It must be
-an absolute path, because pagio just looks at the first character.
+an absolute path, because pagio just looks at the first character to determine
+if the host is a Unix domain socket.
 
 
 Authentication

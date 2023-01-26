@@ -1,7 +1,7 @@
 """ Common functionality """
 
 import enum
-from struct import Struct
+from functools import partial
 from typing import (
     Tuple, Any, Optional, Union, List, Iterator, NamedTuple, Callable)
 
@@ -10,10 +10,13 @@ try:
 except ImportError:
     from typing_extensions import Protocol  # type: ignore
 
+int_from_bytes = partial(int.from_bytes, byteorder="big", signed=True)
+uint_from_bytes = partial(int.from_bytes, byteorder="big")
 
-ushort_struct = Struct('!H')
 
-ResConverter = Callable[[Any, memoryview], Any]
+def int4_to_bytes(val: int) -> bytes:
+    """ Convert int to 4 byte signed bigendian value. """
+    return val.to_bytes(4, "big", signed=True)
 
 
 class Format(enum.IntEnum):
@@ -75,6 +78,7 @@ class InterfaceError(Error):
 
 
 class ServerInfoMixin:
+    """ Mixin for PG server exception/notice arguments. """
     args: Tuple[
         Severity, str, str, Optional[str], Optional[str],
         Union[None, str, int], Union[None, str, int], Optional[str],
@@ -171,7 +175,7 @@ class ServerInfoMixin:
         return str(self.args[:3])
 
 
-class ServerError(ServerInfoMixin, Error):
+class ServerError(ServerInfoMixin, Error):  # type: ignore
     """ Error reported by PostgreSQL server """
 
 
@@ -207,11 +211,11 @@ class CachedQueryExpired(InternalError):
     """ Error raised when a cached query is expired. """
 
 
-class ServerWarning(ServerInfoMixin, Warning):
+class ServerWarning(ServerInfoMixin, Warning):  # type: ignore
     """ Warning class """
 
 
-class ServerNotice(ServerInfoMixin, Warning):
+class ServerNotice(ServerInfoMixin, Warning):  # type: ignore
     """ Warning class """
 
 
@@ -264,11 +268,18 @@ class FieldInfo(NamedTuple):
     format: int
 
 
-class Result(NamedTuple):
+class Result:
     """ Result of single executed statement. """
-    fields: Optional[Tuple[FieldInfo, ...]]
-    rows: Optional[List[Tuple[Any, ...]]]
-    command_tag: str
+
+    def __init__(
+            self,
+            fields: Optional[Tuple[FieldInfo, ...]],
+            rows: Optional[List[Tuple[Any, ...]]],
+            command_tag: str,
+    ) -> None:
+        self.fields = fields
+        self.rows = rows
+        self.command_tag = command_tag
 
     @property
     def records_affected(self) -> Optional[int]:
@@ -279,6 +290,20 @@ class Result(NamedTuple):
             if recs.isdigit():
                 return int(recs)
         return None
+
+    def _row_list(self) -> List[Tuple[Any, ...]]:
+        if self.rows is None:
+            raise ValueError("Not a row returning statement.")
+        return self.rows
+
+    def __iter__(self) -> Iterator[Tuple[Any, ...]]:
+        return iter(self._row_list())
+
+    def __len__(self) -> int:
+        return len(self._row_list())
+
+    def __getitem__(self, key: int) -> Tuple[Any, ...]:
+        return self._row_list()[key]
 
 
 class ResultSet:
@@ -295,27 +320,21 @@ class ResultSet:
         self._result_index = 0
 
     def _current(self) -> Result:
-        return self._results[self._result_index]
+        try:
+            return self._results[self._result_index]
+        except IndexError as ex:
+            raise ValueError("No more result sets available.") from ex
 
     def __iter__(self) -> Iterator[Tuple[Any, ...]]:
-        result = self._current()
-        if result.rows is None:
-            raise ValueError("Not a resultset")
-        return iter(result.rows)
+        return iter(self._current())
 
     def __len__(self) -> int:
-        result = self._current()
-        if result.rows is None:
-            raise ValueError("Not a resultset")
-        return len(result.rows)
+        return len(self._current())
 
     def __getitem__(self, key: int) -> Tuple[Any, ...]:
-        result = self._current()
-        if result.rows is None:
-            raise ValueError("Not a resultset")
-        return result.rows[key]
+        return self._current()[key]
 
-    def next_result(self) -> bool:
+    def nextset(self) -> bool:
         """ Advances to the next result set. """
         num_results = len(self._results)
         if self._result_index < num_results:

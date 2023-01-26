@@ -1,18 +1,16 @@
 """ Asynchronous version of Protocol """
-import asyncio
 from asyncio import (
-    BufferedProtocol, Transport, shield, Future, get_running_loop,
+    BufferedProtocol, Transport, Task, Future, get_running_loop,
     BaseTransport, BaseProtocol, wait, FIRST_COMPLETED, create_task,
-    AbstractEventLoop, Queue, CancelledError,
+    AbstractEventLoop, Queue, CancelledError, Event,
 )
 from collections import deque
 from inspect import isawaitable
 from io import TextIOBase
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode
-from struct import Struct
 from typing import (
     Optional, Any, Union, cast, List, Tuple, Callable, Awaitable, Coroutine,
-    Deque, Mapping,
+    Deque, Mapping, Set,
 )
 
 import scramp
@@ -23,11 +21,8 @@ from .base_protocol import (
     _STATUS_EXECUTING, _STATUS_CLOSING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, CopyFile,
-    Notification, InterfaceError, ServerError, Severity,
+    Notification, InterfaceError, ServerError, Severity, int4_to_bytes,
 )
-
-
-int_struct_pack = Struct('!i').pack
 
 
 def async_wrap(
@@ -53,35 +48,47 @@ class _AsyncPGProtocol(_BasePGProtocol):
         super().__init__()
         self._loop = get_running_loop()
         self._read_fut: Optional[Future[Any]] = None
-        self._write_fut: Optional[Future[None]] = None
+        self._write_event = Event()
         self._close_fut: Optional[Future[None]] = None
         self._copy_out_fut: Optional[Future[Any]] = None
         self.notify_queue: Queue[Notification] = Queue()
-        self._copy_out_data: Optional[Deque[bytes]] = None
+        self._copy_out_data: Optional[Deque[Optional[bytes]]] = None
+        self._tasks: Set['Task[Any]'] = set()
+
+    def _create_task(self, coro: Coroutine[Any, None, Any]) -> 'Task[Any]':
+        task = create_task(coro)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     def enqueue_notification(self, notification: Notification) -> None:
         self.notify_queue.put_nowait(notification)
 
     def handle_copy_data_response(self, msg_buf: memoryview) -> None:
-        if self._copy_out_data is None and not self._copy_out_fut.done():
-            raise ValueError("Unexpected COPY OUT data")
+        if self._copy_out_data is None:
+            if self._copy_out_fut and not self._copy_out_fut.done():
+                raise ValueError("Unexpected COPY OUT data")
+            return
+        if self._copy_out_fut is None:
+            return
         self._copy_out_data.append(bytes(msg_buf))
         if not self._copy_out_fut.done():
             self._copy_out_fut.set_result(None)
 
     def handle_copy_done_response(self, msg_buf: memoryview) -> None:
         if self._copy_out_data is None:
-            if not self._copy_out_fut.done():
+            if self._copy_out_fut and not self._copy_out_fut.done():
                 self._copy_out_fut.cancel()
                 raise ValueError("Unexpected COPY OUT data")
+            return
+        if self._copy_out_fut is None:
             return
         self._copy_out_data.append(None)
         if not self._copy_out_fut.done():
             self._copy_out_fut.set_result(None)
 
-    async def copy_out_task(self, user_fut: Future):
+    async def copy_out_task(self, user_fut: 'Future[Any]') -> None:
         try:
-            write_method = self.file_obj.write
+            write_method = self.file_obj.write  # type: ignore
         except AttributeError as ex:
             raise ValueError(
                 "Invalid output file, missing write method.") from ex
@@ -90,6 +97,8 @@ class _AsyncPGProtocol(_BasePGProtocol):
         is_text_file = (
                 isinstance(self.file_obj, TextIOBase) or
                 "b" not in getattr(self.file_obj, "mode", "b"))
+        if self._copy_out_fut is None:
+            return
         if not self._copy_out_fut.done():
             self._transport.resume_reading()
         while True:
@@ -100,9 +109,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 if data is None:
                     self._transport.resume_reading()
                     self._copy_out_data = None
-                    await self._read_fut
+                    await self._read_fut  # type: ignore
                     try:
-                        result = self._read_fut.result()
+                        result = self._read_fut.result()  # type: ignore
                     except Exception as ex:
                         if not user_fut.done():
                             user_fut.set_exception(ex)
@@ -111,8 +120,8 @@ class _AsyncPGProtocol(_BasePGProtocol):
                             user_fut.set_result(result)
                     return
                 if is_text_file:
-                    data = data.decode()
-                await write_method(data)
+                    data = data.decode()  # type: ignore
+                await write_method(data)  # type: ignore
             self._transport.resume_reading()
             self._copy_out_fut = self._loop.create_future()
 
@@ -129,9 +138,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # a new one instead. The old one will be set with the result of the new
         # one by the write task when it is finished.
         user_fut = self._read_fut
-        if not user_fut.done():
+        if not user_fut.done():  # type: ignore
             self._read_fut = self._loop.create_future()
-        create_task(self.copy_out_task(user_fut))
+        self._create_task(self.copy_out_task(user_fut))  # type: ignore
 
     def handle_copy_in_response(self,  msg_buf: memoryview) -> None:
         """ Schedule the task to send copy messages """
@@ -139,7 +148,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # Sending copy messages is asynchronous. Because this callback function
         # is not synchronous, use a Task
         if self._read_fut is not None:
-            create_task(self.copy_in_task(msg_buf, self._read_fut))
+            self._create_task(self.copy_in_task(msg_buf, self._read_fut))
 
     async def _copy_in_run_and_check(
             self,
@@ -161,7 +170,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
         # server first.
 
         # wait simultaneously for operation and result Future
-        coro_task = create_task(coro)
+        coro_task = self._create_task(coro)
         done = await wait(
             (read_fut, coro_task), return_when=FIRST_COMPLETED)
 
@@ -218,11 +227,11 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 else:
                     # CopyDone message
                     msg = b'c\x00\x00\x00\x04'
-                write_task = create_task(self.write(msg))
+                write_task = self._create_task(self.write(msg))
                 await wait((read_fut, write_task), return_when=FIRST_COMPLETED)
                 break
             # CopyData message
-            message = [b'd', int_struct_pack(len(data) + 4), data]
+            message = [b'd', int4_to_bytes(len(data) + 4), data]
             success, _ = await self._copy_in_run_and_check(
                 self.writelines(message), read_fut)
             if not success:
@@ -250,6 +259,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
     def connection_made(self, transport: BaseTransport) -> None:
         """ Callback for transport """
         self._transport = cast(Transport, transport)
+        self._write_event.set()
         self._status = _STATUS_CONNECTED
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
@@ -261,8 +271,9 @@ class _AsyncPGProtocol(_BasePGProtocol):
                 self._close_fut.set_exception(exc)
         else:
             if self._read_fut is not None and not self._read_fut.done():
-                if self._ex and self._ex.severity == Severity.FATAL:
-                    ex = self._ex
+                if (self._ex and isinstance(self._ex, ServerError) and
+                        self._ex.severity == Severity.FATAL):
+                    ex: Exception = self._ex
                 else:
                     ex = InterfaceError("Connection is closed.")
                 self._read_fut.set_exception(ex)
@@ -271,23 +282,20 @@ class _AsyncPGProtocol(_BasePGProtocol):
 
     def pause_writing(self) -> None:
         """ Callback for transport """
-        self._write_fut = self._loop.create_future()
+        self._write_event.clear()
 
     def resume_writing(self) -> None:
         """ Callback for transport """
-        if self._write_fut is not None:
-            self._write_fut.set_result(None)
+        self._write_event.set()
 
     async def write(self, data: bytes) -> None:
         """ Send data to the server """
-        if self._write_fut is not None:
-            await shield(self._write_fut)
+        await self._write_event.wait()
         self._transport.write(data)
 
     async def writelines(self, data: List[bytes]) -> None:
         """ Send multiple data chunks to the server """
-        if self._write_fut is not None:
-            await shield(self._write_fut)
+        await self._write_event.wait()
         self._transport.writelines(data)
 
     async def start_tls(
@@ -424,7 +432,7 @@ class _AsyncPGProtocol(_BasePGProtocol):
     def _set_exception(self, ex: BaseException) -> None:
         if isinstance(ex, ServerError) and ex.severity == Severity.FATAL:
             self._ex = ex
-            self._loop.create_task(self._close())
+            self._create_task(self._close())
         elif self._read_fut and not self._read_fut.done():
             self._read_fut.set_exception(ex)
 

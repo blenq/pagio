@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 from setuptools import setup, Extension
 
 
@@ -35,8 +37,4 @@ pagio_ext = Extension(
 )
 
 
-setup(name='pagio',
-      version='0.1',
-      description='PostgreSQL client library',
-      ext_modules=[pagio_ext],
-      packages=['pagio'])
+setup(ext_modules=[pagio_ext])

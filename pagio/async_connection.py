@@ -110,13 +110,17 @@ class AsyncConnection(BaseConnection):
             ssl_mode = SSLMode.REQUIRE
         else:
             ssl_mode = SSLMode.DISABLE
+
         prot = await self._connect_protocol(ssl_mode)
 
-        # If existing connection is still executing, send Cancel Request on the
-        # new connection with backend key info of the current connection
-        if self.status is ProtocolStatus.EXECUTING:
-            await prot.cancel(self._protocol.backend_key)
-        await prot.close()
+        try:
+            # If existing connection is still executing, send Cancel Request
+            # on the new connection with backend key info of the current
+            # connection
+            if self.status is ProtocolStatus.EXECUTING:
+                await prot.cancel(self._protocol.backend_key)
+        finally:
+            await prot.close()
 
     async def execute(
             self,
@@ -142,7 +146,7 @@ class AsyncConnection(BaseConnection):
                 await asyncio.wait_for(self._protocol, 2)
             finally:
                 if self.status is not ProtocolStatus.READY_FOR_QUERY:
-                    self.close()
+                    await self.close()
                 raise ex
 
     async def close(self) -> None:

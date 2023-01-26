@@ -14,12 +14,10 @@ statement is tied to the client connection and not visible to others.
 Because of this and the relatively large overhead of starting a new client
 connection, it is good practice to use long living database connections.
 
-There are
-two versions of prepared statements. The first one is a statement that is
-defined using the `PREPARE syntax
-<https://www.postgresql.org/docs/current/sql-prepare.html>`_.
+There are two ways to create a prepared statement. The first one is using the
+`PREPARE syntax <https://www.postgresql.org/docs/current/sql-prepare.html>`_.
 
-The second version is a `protocol level prepared statement
+The second method is preparing the statement at `protocol level
 <https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY>`_.
 This is implemented for example by the `PQprepare function
 <https://www.postgresql.org/docs/15/libpq-exec.html#id-1.7.3.10.3.7.1.1.1.2>`_
@@ -39,7 +37,7 @@ This speeds up the process for two reasons:
 - There is less protocol traffic and processing necessary for the client.
   It doesn't request nor receive metadata (like number of columns, and data
   types).
-- PostgreSQL does not need to parse the statement.
+- PostgreSQL does not need to parse the SQL statement.
 
 This happens all transparently from the caller's perspective, but a bit of
 insight in the inner workings might be useful.

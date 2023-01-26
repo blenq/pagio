@@ -1,9 +1,11 @@
-from codecs import decode
 import re
-from struct import unpack_from
-from typing import Any, Callable, List, Collection, Tuple, TypeVar
+from typing import (
+    Any, Generator, List, Collection, Tuple, TypeVar, Optional, Generic)
 
-from ..common import ResConverter, ProtocolError
+import pagio
+
+from ..common import ProtocolError, int_from_bytes, uint_from_bytes
+from .conv_utils import simple_decode, ResConverter
 
 start_array = ord('{')
 end_array = ord('}')
@@ -11,14 +13,14 @@ quote = ord('"')
 backslash = ord('\\')
 
 
-def simple_decode(conn, buf: memoryview) -> str:
-    return decode(buf)
-
-
 T = TypeVar('T')
 
 
-def parse_quoted(buf: memoryview, conn, converter=simple_decode) -> Any:
+def parse_quoted(
+        buf: memoryview,
+        conn: 'pagio.base_protocol._AbstractPGProtocol',
+        converter: ResConverter[T] = simple_decode,  # type: ignore
+) -> Tuple[T, int]:
     escaped = False
     pos = 1
     buf_len = len(buf)
@@ -32,6 +34,7 @@ def parse_quoted(buf: memoryview, conn, converter=simple_decode) -> Any:
             escaped = True
         elif char == quote:
             if pos + 1 < buf_len and buf[pos + 1] == quote:
+                # double escaped " for hstore
                 escaped = True
             else:
                 return converter(conn, memoryview(bytes(chars))), pos + 1
@@ -44,9 +47,9 @@ def parse_quoted(buf: memoryview, conn, converter=simple_decode) -> Any:
 def parse_unquoted(
         buf: memoryview,
         delims: Collection[int],
-        conn,
-        converter: Callable[[Any, memoryview], T] = simple_decode,
-) -> Tuple[T, int]:
+        conn: 'pagio.base_protocol._AbstractPGProtocol',
+        converter: ResConverter[T] = simple_decode,  # type: ignore
+) -> Tuple[Optional[T], int]:
     pos = 0
     buf_len = len(buf)
     while pos < buf_len:
@@ -66,21 +69,26 @@ def parse_unquoted(
     return val, pos
 
 
-class ArrayConverter:
+class ArrayConverter(Generic[T]):
 
-    def __init__(self, delimiter: str, converter: ResConverter) -> None:
+    def __init__(self, delimiter: str, converter: ResConverter[T]) -> None:
         self._delims = [ord(c) for c in delimiter + "}"]
         self._converter = converter
 
-    def _parse_array(self, conn, buf: memoryview) -> List[Any]:
+    def _parse_array(
+            self,
+            conn: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> Tuple[List[Any], int]:
         i = 1
         buf_len = len(buf)
-        vals = []
+        vals: List[Any] = []
+        item: Optional[T]
         while i < buf_len:
             char = buf[i]
             if char == start_array:
-                item, pos = self._parse_array(conn, buf[i:])
-                vals.append(item)
+                list_item, pos = self._parse_array(conn, buf[i:])
+                vals.append(list_item)
                 i += pos
             elif char == quote:
                 item, pos = parse_quoted(
@@ -103,7 +111,11 @@ class ArrayConverter:
 
         raise ProtocolError("Invalid array value")
 
-    def __call__(self, conn, buf: memoryview) -> List[Any]:
+    def __call__(
+            self,
+            conn: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> List[Any]:
         i = 0
         buf_len = len(buf)
         while i < buf_len:
@@ -117,36 +129,47 @@ class ArrayConverter:
         raise ProtocolError("Invalid array value")
 
 
-class BinArrayConverter:
-    def __init__(self, elem_oid: int, converter: ResConverter) -> None:
+class BinArrayConverter(Generic[T]):
+    def __init__(self, elem_oid: int, converter: ResConverter[T]) -> None:
         self._elem_oid = elem_oid
         self._converter = converter
 
-    def _get_values(self, conn, buf: memoryview, array_dims: List[int]):
+    def _get_values(
+            self,
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+            array_dims: List[int],
+    ) -> Tuple[Any, int]:
         if array_dims:
             # get an array of (nested) values
             dim = array_dims[0]
             i = 0
             vals = []
             for _ in range(dim):
-                val, pos = self._get_values(conn, buf[i:], array_dims[1:])
+                val, pos = self._get_values(prot, buf[i:], array_dims[1:])
                 vals.append(val)
                 i += pos
             return vals, i
 
         # get a single value, either NULL or an actual value prefixed by a
         # length
-        [item_len] = unpack_from("!i", buf, 0)
+        item_len = int_from_bytes(buf[:4])
         if item_len == -1:
             return None, 4
         full_length = 4 + item_len
         val_buf = buf[4:full_length]
         if item_len > len(val_buf):
             raise ProtocolError("Invalid array value.")
-        return self._converter(conn, val_buf), full_length
+        return self._converter(prot, val_buf), full_length
 
-    def __call__(self, conn, buf: memoryview):
-        dims, flags, elem_type = unpack_from("!IiI", buf, 0)
+    def __call__(
+            self,
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> Any:
+        dims = uint_from_bytes(buf[:4])
+        flags = int_from_bytes(buf[4:8])
+        elem_type = uint_from_bytes(buf[8:12])
 
         if elem_type != self._elem_oid:
             raise ProtocolError("Unexpected element type")
@@ -158,9 +181,10 @@ class BinArrayConverter:
             return []
         pos = 12
         array_dims = [
-            unpack_from("!ii", buf, pos + i * 8)[0] for i in range(dims)]
+            int_from_bytes(buf[pos + i * 8: pos + i * 8 + 4])
+            for i in range(dims)]
         pos += 8 * dims
-        vals, vals_pos = self._get_values(conn, buf[pos:], array_dims)
+        vals, vals_pos = self._get_values(prot, buf[pos:], array_dims)
         pos += vals_pos
         if pos != len(buf):
             raise ProtocolError("Invalid array value")
@@ -172,13 +196,13 @@ class PGArray:
     delimiter: str = ","
     ws_pattern = re.compile("[\\s{}\"\']")
 
-    def __init__(self, vals: List[Any]):
+    def __init__(self, vals: List[Any]) -> None:
         self._vals = vals
 
-    def _val_to_str(self, val):
+    def _val_to_str(self, val: Any) -> str:
         return str(val)
 
-    def _get_vals(self):
+    def _get_vals(self) -> Generator[str, None, None]:
         for val in self._vals:
             if val is None:
                 yield "NULL"
@@ -193,8 +217,8 @@ class PGArray:
             else:
                 yield val
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{{{self.delimiter.join(self._get_vals())}}}"
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.__class__.__name__}({repr(self._vals)})"

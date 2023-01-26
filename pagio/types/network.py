@@ -4,23 +4,28 @@ from codecs import decode
 from ipaddress import (
     ip_interface, ip_network, IPv4Interface, IPv6Interface, IPv4Network,
     IPv6Network, IPv4Address, IPv6Address)
-from struct import unpack_from
 from typing import Union, Callable, Any, cast, Tuple
 
+import pagio
+
 from .array import PGArray
-from ..common import ProtocolError, check_length_equal, Format
+from ..common import ProtocolError, check_length_equal, Format, uint_from_bytes
 from ..const import INETOID, CIDROID, INETARRAYOID
 from .text import str_to_pg
 
 
 def txt_inet_to_python(
-        conn, buf: memoryview) -> Union[IPv4Interface, IPv6Interface]:
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[IPv4Interface, IPv6Interface]:
     """ Converts text to IP interface """
     return ip_interface(decode(buf))
 
 
 def txt_cidr_to_python(
-        conn, buf: memoryview) -> Union[IPv4Network, IPv6Network]:
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[IPv4Network, IPv6Network]:
     """ Converts text to IP network """
     return ip_network(decode(buf))
 
@@ -29,17 +34,22 @@ PGSQL_AF_INET = 2
 PGSQL_AF_INET6 = 3
 
 
-def bin_ip_to_python(buf: memoryview, cidr, cons) -> Any:
-    family, mask, is_cidr, size = unpack_from("4B", buf)
+def bin_ip_to_python(
+        buf: memoryview,
+        cidr: int,
+        cons: Callable[[Any], Any],
+) -> Any:
+    family, mask, is_cidr, size = buf[:4]
 
     if is_cidr != cidr:
         raise ProtocolError("Wrong value for cidr flag")
 
+    addr_data: Union[int, bytes]
     if family == PGSQL_AF_INET:
         if size != 4:
             raise ProtocolError("Invalid IPv4 value.")
         check_length_equal(8, buf)
-        [addr_data] = unpack_from("!I", buf, 4)
+        addr_data = uint_from_bytes(buf[4:8])
     elif family == PGSQL_AF_INET6:
         if size != 16:
             raise ProtocolError("Invalid IPv6 value.")
@@ -50,11 +60,17 @@ def bin_ip_to_python(buf: memoryview, cidr, cons) -> Any:
     return cons((addr_data, mask))
 
 
-def bin_inet_to_python(conn, buf: memoryview) -> Any:
+def bin_inet_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Any:
     return bin_ip_to_python(buf, 0, ip_interface)
 
 
-def bin_cidr_to_python(conn, buf: memoryview) -> Any:
+def bin_cidr_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Any:
     return bin_ip_to_python(buf, 1, ip_network)
 
 
@@ -87,7 +103,7 @@ class PGInet:  # pylint: disable=too-few-public-methods
     def __str__(self) -> str:
         return str(self._val)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return repr(self._val)
 
 

@@ -3,8 +3,10 @@ import json
 from binascii import a2b_hex
 from codecs import decode
 from json import loads, dumps, JSONEncoder
-from typing import Iterator, Generator, Any, Tuple, Optional
+from typing import Iterator, Generator, Any, Tuple, Optional, Type
 from uuid import UUID
+
+import pagio
 
 from .array import PGArray
 from ..common import Format, ProtocolError
@@ -15,7 +17,10 @@ from ..const import (
 # ======== bytea ============================================================ #
 
 
-def txt_bytea_to_python(conn, buf: memoryview) -> bytes:
+def txt_bytea_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> bytes:
     """ Converts a PG textual bytea value to Python bytes object """
 
     if buf[:2] == b'\\x':
@@ -61,12 +66,18 @@ def bytes_to_pg(val: bytes) -> Tuple[int, str, bytes, int, Format]:
 # ======== uuid ============================================================= #
 
 
-def txt_uuid_to_python(conn, buf: memoryview) -> UUID:
+def txt_uuid_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> UUID:
     """ Converts PG textual value to Python UUID """
     return UUID(decode(buf))
 
 
-def bin_uuid_to_python(conn, buf: memoryview) -> UUID:
+def bin_uuid_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> UUID:
     """ Converts PG binary value to Python UUID """
     return UUID(bytes=bytes(buf))
 
@@ -100,12 +111,18 @@ def default_to_pg(val: Any) -> Tuple[int, str, bytes, int, Format]:
 # ======== jsonb ============================================================ #
 
 
-def txt_json_to_python(conn, buf: memoryview) -> Any:
+def txt_json_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Any:
     """ Converts textual PG json to Python """
     return loads(decode(buf))
 
 
-def bin_jsonb_to_python(conn, buf: memoryview) -> Any:
+def bin_jsonb_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Any:
     """ Converts binary PG jsonb to Python """
     if buf[0] != 1:
         raise ProtocolError("Invalid jsonb version")
@@ -117,28 +134,33 @@ class PGJson:  # pylint: disable=too-few-public-methods
 
     oid = JSONBOID
 
-    def __init__(self, val: Any, *, cls: Optional[JSONEncoder] = None) -> None:
+    def __init__(
+            self,
+            val: Any,
+            *,
+            cls: Optional[Type[JSONEncoder]] = None,
+    ) -> None:
         self._val = val
         self._encoder = cls
 
     def __str__(self) -> str:
-        return json.dumps(self._val, cls=self._encoder)
+        return dumps(self._val, cls=self._encoder)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"PGJson({repr(self._val)})"
 
 
 class PGText(str):
     oid = TEXTOID
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"PGText({super().__repr__()})"
 
 
 class PGRegConfig(str):
     oid = REGCONFIGOID
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"PGRegConfig({super().__repr__()})"
 
 

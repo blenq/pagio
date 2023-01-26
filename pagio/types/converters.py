@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta, time
 import decimal
 import ipaddress
 import sys
-from typing import NamedTuple, Optional, Any, Type, Dict, Tuple
+from typing import NamedTuple, Optional, Any, Type, Dict, Tuple, TypeVar, Generator
 import uuid
 
 if sys.version_info >= (3, 10):
@@ -12,22 +12,24 @@ else:
     NoneType = type(None)
 
 from pagio import const
-from ..common import Format, ResConverter, ParamConverter
+from ..common import Format, ParamConverter
 from . import numeric, text, dt, network, range, array
-from .conv_utils import simple_int, simple_decode, simple_bytes, _simple_conv
+from .conv_utils import (
+    simple_int, simple_decode, simple_bytes, _simple_conv, ResConverter)
 
 
 # ======= Result converters ===================================================
 
+
 class PGTypeInfo(NamedTuple):
     """ PostgreSQL type info """
 
-    txt_conv: ResConverter  # result converter for TEXT format
-    bin_conv: ResConverter  # result converter for BINARY format
-    array_oid: int          # corresponding array type identifier
-    array_delimiter: str = ','  # array delimiter used in TEXT format
+    txt_conv: ResConverter[Any]  # result converter for TEXT format
+    bin_conv: ResConverter[Any]  # result converter for BINARY format
+    array_oid: int               # corresponding array type identifier
+    array_delimiter: str = ','   # array delimiter used in TEXT format
     range_oid: Optional[int] = None  # range type identifier
-    range_class: Optional[Type[range.BasePGRange]] = None  # client range class
+    range_class: Optional[Type[range.BasePGRange[Any]]] = None  # client range class
     range_array_oid: Optional[int] = None  # range array type identifier
 
 
@@ -154,7 +156,7 @@ PGTypes = {
 default_res_converters = (simple_decode, simple_bytes)
 
 
-def get_res_converters():
+def get_res_converters() -> Generator[Tuple[int, Tuple[ResConverter[Any], ResConverter[Any]]], None, None]:
     # For every PG type yield the result converters for the PG type itself, for
     # the corresponding array type and if defined also for the corresponding
     # range type and the range array type
@@ -168,7 +170,8 @@ def get_res_converters():
             array.ArrayConverter(type_info.array_delimiter, type_info.txt_conv),
             array.BinArrayConverter(elem_oid, type_info.bin_conv))
 
-        if type_info.range_oid:
+        if (type_info.range_oid and type_info.range_class and
+                type_info.range_array_oid):
             range_txt_conv = range.TxtRangeResultConverter(
                 type_info.range_class, type_info.txt_conv)
             range_bin_conv = range.BinRangeResultConverter(
@@ -203,7 +206,7 @@ def none_to_pg(val: None) -> Tuple[int, str, None, int, Format]:
 param_converters: Dict[Type[Any], ParamConverter] = {
     int: numeric.int_to_pg,
     str: text.str_to_pg,
-    NoneType: none_to_pg,
+    NoneType: none_to_pg,  # type: ignore
     float: numeric.float_to_pg,
     bool: numeric.bool_to_pg,
     uuid.UUID: text.uuid_to_pg,

@@ -1,14 +1,30 @@
 from abc import ABC, abstractmethod
 from enum import Flag
-from functools import partial, cached_property
+from functools import partial
 import operator
-import struct
-from typing import Generic, Optional, TypeVar, Type, Callable, Union
+import sys
+from typing import Generic, Optional, TypeVar, Type, Union, Any, List, cast
+
+if sys.version_info >= (3, 8):
+    from functools import cached_property
+    from typing import Protocol
+else:
+    from backports.cached_property import cached_property
+    from typing_extensions import Protocol
+
+import pagio
 
 from .array import parse_unquoted, parse_quoted, quote
-from ..common import ResConverter
+from ..common import int_from_bytes
+from .conv_utils import ResConverter, comma, right_parens
 
-T = TypeVar('T')
+
+T = TypeVar('T', bound='SupportsLT')
+
+
+class SupportsLT(Protocol):
+    def __lt__(self: T, other: T) -> bool:
+        ...
 
 
 class BasePGRange(Generic[T]):
@@ -27,11 +43,9 @@ class BasePGRange(Generic[T]):
             self._set_empty()
             return
 
-        if isinstance(lower, str):
-            if lower != 'empty':
-                raise ValueError("Invalid value for lower bound.")
+        if isinstance(lower, str) and lower == 'empty':
             if upper is not None:
-                raise  ValueError(
+                raise ValueError(
                     "If 'empty' value, upper bound can not be set.")
             self._set_empty()
             return
@@ -66,23 +80,23 @@ class BasePGRange(Generic[T]):
         self._upper = upper
 
     @property
-    def lower(self):
+    def lower(self) -> Optional[T]:
         """ Lower bound """
         return self._lower
 
     @property
-    def upper(self):
+    def upper(self) -> Optional[T]:
         """ Upper bound """
         return self._upper
 
     @property
-    def bounds(self):
+    def bounds(self) -> Optional[str]:
         """ Bounds """
         if self._empty:
             return None
         return f"{['(', '['][self._lower_inc]}{[')', ']'][self._upper_inc]}"
 
-    def _set_empty(self):
+    def _set_empty(self) -> None:
         self._lower = None
         self._upper = None
         self._lower_inc = False
@@ -90,16 +104,16 @@ class BasePGRange(Generic[T]):
         self._empty = True
 
     @classmethod
-    def empty(cls) -> 'BaseRange[T]':
+    def empty(cls) -> 'BasePGRange[T]':
         """ Returns an empty range """
         return cls(None, None, None)
 
     @property
-    def is_empty(self):
+    def is_empty(self) -> bool:
         return self._empty
 
     @cached_property
-    def _contains_checks(self):
+    def _contains_checks(self) -> List[Any]:
         checks = []
 
         if self._lower is not None:
@@ -124,24 +138,24 @@ class BasePGRange(Generic[T]):
             return False
         return all(check(item) for check in self._contains_checks)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, BasePGRange) and self._lower == other._lower and
             self._upper == other._upper and
             self._lower_inc == other._lower_inc and
             self._upper_inc == other._upper_inc)
 
-    def _type_check(self, val: T) -> T:
-        return val
+    def _type_check(self, val: Any) -> T:
+        return cast(T, val)
 
-    def __str__(self):
+    def __str__(self) -> str:
         if self._empty:
             return "empty"
         start = '[' if self._lower_inc else '('
         end = ']' if self._upper_inc else ')'
         return f"{start}{self._lower},{self._upper}{end}"
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         if self._empty:
             bounds = None
         else:
@@ -159,7 +173,7 @@ class DiscreteRange(BasePGRange[T], ABC):
             lower: Optional[T],
             upper: Optional[T],
             bounds: Optional[str] = '[)'
-    ):
+    ) -> None:
         super().__init__(lower, upper, bounds)
         if self._lower is not None and not self._lower_inc:
             self._lower = self._type_check(self.increment(self._lower))
@@ -184,16 +198,18 @@ class RangeFlags(Flag):
     RANGE_CONTAIN_EMPTY = 0x80  # Something internal to postgres and GiST
 
 
-int4_struct = struct.Struct("!i")
-
-
 class BinRangeResultConverter(Generic[T]):
 
-    def __init__(self, range_class: Type[BasePGRange[T]], conv: ResConverter):
+    def __init__(
+            self, range_class: Type[BasePGRange[T]], conv: ResConverter[Any]):
         self.range_class = range_class
         self.conv = conv
 
-    def __call__(self, conn, buf: memoryview) -> BasePGRange[T]:
+    def __call__(
+            self,
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> BasePGRange[T]:
         flags = RangeFlags(buf[0])
         pos = 1
         if flags & RangeFlags.RANGE_EMPTY:
@@ -213,33 +229,37 @@ class BinRangeResultConverter(Generic[T]):
             if flags & RangeFlags.RANGE_LB_INF:
                 lower = None
             else:
-                [lower_len] = int4_struct.unpack_from(buf, pos)
+                lower_len = int_from_bytes(buf[pos:pos + 4])
                 pos += 4
-                lower = self.conv(conn, buf[pos:pos + lower_len])
+                lower = self.conv(prot, buf[pos:pos + lower_len])
                 pos += lower_len
             if flags & RangeFlags.RANGE_UB_INF:
                 upper = None
             else:
-                [upper_len] = int4_struct.unpack_from(buf, pos)
+                upper_len = int_from_bytes(buf[pos:pos + 4])
                 pos += 4
-                upper = self.conv(conn, buf[pos:pos + upper_len])
+                upper = self.conv(prot, buf[pos:pos + upper_len])
                 pos += upper_len
         if pos != len(buf):
             raise ValueError("Invalid binary range value")
         return self.range_class(lower, upper, bounds)
 
 
-comma = ord(',')
-range_end = (ord(']'), ord(')'))
+range_end = (ord(']'), right_parens)
 
 
 class TxtRangeResultConverter(Generic[T]):
 
-    def __init__(self, range_class: Type[BasePGRange[T]], conv: ResConverter):
+    def __init__(
+            self, range_class: Type[BasePGRange[T]], conv: ResConverter[Any]):
         self.range_class = range_class
         self.conv = conv
 
-    def __call__(self, conn, buf: memoryview) -> BasePGRange[T]:
+    def __call__(
+            self,
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> BasePGRange[T]:
         if buf == b'empty':
             lower = None
             upper = None
@@ -247,25 +267,25 @@ class TxtRangeResultConverter(Generic[T]):
         else:
             pos = 1
             if buf[pos] == quote:
-                lower, new_pos = parse_quoted(buf[pos:], conn, self.conv)
+                lower, new_pos = parse_quoted(buf[pos:], prot, self.conv)
                 pos += new_pos
             elif buf[pos] == comma:
                 lower = None
             else:
                 lower, new_pos = parse_unquoted(
-                    buf[pos:], (comma,), conn, self.conv)
+                    buf[pos:], (comma,), prot, self.conv)
                 pos += new_pos
             if buf[pos] != comma:
                 raise ValueError("Invalid range value.")
             pos += 1
             if buf[pos] == quote:
-                upper, new_pos = parse_quoted(buf[pos:], conn, self.conv)
+                upper, new_pos = parse_quoted(buf[pos:], prot, self.conv)
                 pos += new_pos
             elif buf[pos] in range_end:
                 upper = None
             else:
                 upper, new_pos = parse_unquoted(
-                    buf[pos:], range_end, conn, self.conv)
+                    buf[pos:], range_end, prot, self.conv)
                 pos += new_pos
 
             bounds = chr(buf[0]) + chr(buf[pos])

@@ -159,9 +159,9 @@ class ConnCase(IsolatedAsyncioTestCase):
         async with await AsyncConnection(database="postgres") as cn:
             res = await cn.execute("BEGIN;SELECT 1;COMMIT")
             self.assertIsNone(res.fields)
-            res.next_result()
+            res.nextset()
             self.assertIsNotNone(res.fields)
-            res.next_result()
+            res.nextset()
             self.assertIsNone(res.fields)
 
     async def test_expired_statement(self):

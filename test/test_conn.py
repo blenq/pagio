@@ -186,9 +186,9 @@ class ConnCase(unittest.TestCase):
         with Connection(database="postgres") as cn:
             res = cn.execute("BEGIN;SELECT 1;COMMIT")
             self.assertIsNone(res.fields)
-            res.next_result()
+            res.nextset()
             self.assertIsNotNone(res.fields)
-            res.next_result()
+            res.nextset()
             self.assertIsNone(res.fields)
 
     def test_expired_statement(self):

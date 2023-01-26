@@ -3,7 +3,6 @@
 from collections import deque
 from io import TextIOBase
 import socket
-from struct import Struct
 from ssl import SSLContext, PROTOCOL_TLS_CLIENT, VerifyMode, SSLSocket
 from typing import Optional, Union, Any, List, Tuple, Deque, Mapping
 
@@ -15,13 +14,11 @@ from .base_protocol import (
     _STATUS_SSL_REQUESTED, _STATUS_EXECUTING)
 from .common import (
     ResultSet, CachedQueryExpired, Format, StatementDoesNotExist, SyncCopyFile,
-    Notification, InterfaceError, ServerError, Severity,
+    Notification, InterfaceError, ServerError, Severity, int4_to_bytes,
 )
 
 
 NO_RESULT = object()
-
-int_struct_pack = Struct('!i').pack
 
 
 class _PGProtocol(_BasePGProtocol):
@@ -33,7 +30,7 @@ class _PGProtocol(_BasePGProtocol):
 
     def __init__(self, sock: socket.socket):
         super().__init__()
-        self.sock = sock
+        self.sock: Optional[socket.socket] = sock
         self._sync_result = NO_RESULT
         self._status = _STATUS_CONNECTED
         self.notify_queue: Deque[Notification] = deque()
@@ -46,7 +43,7 @@ class _PGProtocol(_BasePGProtocol):
         if self.file_obj is None:
             raise ValueError("File object is not set")
         try:
-            write_method = self.file_obj.write
+            write_method = self.file_obj.write  # type: ignore
         except AttributeError as ex:
             raise ValueError(
                 "Invalid output file, missing write method.") from ex
@@ -60,7 +57,7 @@ class _PGProtocol(_BasePGProtocol):
 
     def handle_copy_data_response(self, msg_buf: memoryview) -> None:
         """ Handle a copy data response """
-        self._write_method(bytes(msg_buf))
+        self._write_method(bytes(msg_buf))  # type: ignore
 
     def handle_copy_done_response(self, msg_buf: memoryview) -> None:
         """ Handle a copy done response """
@@ -87,8 +84,7 @@ class _PGProtocol(_BasePGProtocol):
                     msg = b'c\x00\x00\x00\x04'
                 self.write(msg)
                 break
-            message = [b'd', int_struct_pack(len(data) + 4), data]
-            self.writelines(message)
+            self.writelines([b'd', int4_to_bytes(len(data) + 4), data])
 
     # pylint: disable-next=unused-argument
     def handle_copy_in_response(self, msg_buf: memoryview) -> None:
@@ -114,6 +110,9 @@ class _PGProtocol(_BasePGProtocol):
             ssl_handshake_timeout: Optional[float] = None,
     ) -> bool:
         """ Starts a TLS session. """
+
+        if self.sock is None:
+            raise InterfaceError("Connection is closed.")
 
         # first ask server permission to use SSL/TLS
         self._status = _STATUS_SSL_REQUESTED
@@ -172,7 +171,7 @@ class _PGProtocol(_BasePGProtocol):
     def write(self, data: bytes) -> None:
         """ Send data to the server """
         try:
-            self.sock.sendall(data)
+            self.sock.sendall(data)  # type: ignore
         except (SystemExit, KeyboardInterrupt):
             raise
         except BaseException:
@@ -185,11 +184,12 @@ class _PGProtocol(_BasePGProtocol):
 
     def poll(self) -> None:
         """ Make a single read pass """
-        num_bytes = self.sock.recv_into(self.get_buffer(-1))
-        if num_bytes == 0:
+        num_bytes = self.sock.recv_into(self.get_buffer(-1))  # type: ignore
+        if num_bytes:
+            self.buffer_updated(num_bytes)
+        else:
             self._close()
             raise ValueError("Connection closed")
-        self.buffer_updated(num_bytes)
 
     def read(self) -> Any:
         """ Read data from server and handle returned data """
@@ -240,6 +240,8 @@ class _PGProtocol(_BasePGProtocol):
                 sql, parameters, result_format, raw_result, file_obj)
         except (CachedQueryExpired, StatementDoesNotExist):
             if self.transaction_status == TransactionStatus.IDLE:
+                # Cached statement is changed or remove on server. No
+                # transaction in progress, so it can be retried.
                 return self._execute(
                     sql, parameters, result_format, raw_result, file_obj)
             raise
@@ -248,8 +250,9 @@ class _PGProtocol(_BasePGProtocol):
         """ Closes the connection """
         if self.status == _STATUS_READY_FOR_QUERY:
             # noinspection PyBroadException
+            msg = self.terminate_message()
             try:
-                self.write(self.terminate_message())
+                self.write(msg)
             except (SystemExit, KeyboardInterrupt):
                 raise
             except BaseException:  # pylint: disable=broad-except
@@ -281,14 +284,14 @@ class NotificationQueue:
     def get(self, timeout: Optional[float] = None) -> Notification:
         """ Gets a notification """
         if self.empty():
-            try:
-                self._protocol.sock.settimeout(timeout)
-                while not self._protocol.notify_queue:
+            self._protocol.sock.settimeout(timeout)  # type: ignore
+            while not self._protocol.notify_queue:
+                try:
                     self._protocol.poll()
-            except (socket.timeout, BlockingIOError) as ex:
-                raise QueueEmpty from ex
-            finally:
-                self._protocol.sock.settimeout(None)
+                except (socket.timeout, BlockingIOError) as ex:
+                    raise QueueEmpty from ex
+                finally:
+                    self._protocol.sock.settimeout(None)  # type: ignore
 
         return self._protocol.notify_queue.popleft()
 
@@ -302,7 +305,7 @@ class NotificationQueue:
 
     def empty(self) -> bool:
         """ Indicates if the queue is empty """
-        return self.qsize() == 0
+        return not bool(self._protocol.notify_queue)
 
 
 class PyPGProtocol(PyBasePGProtocol, _PGProtocol):
@@ -311,10 +314,9 @@ class PyPGProtocol(PyBasePGProtocol, _PGProtocol):
 
 try:
     from ._pagio import CBasePGProtocol
-
-    class PGProtocol(CBasePGProtocol, _PGProtocol):
-        """ C accelerated synchronous version of PG protocol """
-
 except ImportError:
     # fallback to pure python
     PGProtocol = PyPGProtocol  # type: ignore
+else:
+    class PGProtocol(CBasePGProtocol, _PGProtocol):
+        """ C accelerated synchronous version of PG protocol """

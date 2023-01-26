@@ -1,18 +1,22 @@
 """ Numeric conversions """
 import struct
 from codecs import decode
+from ctypes import c_float
 from decimal import Decimal
 from struct import Struct
-from typing import Tuple, Any, Generator, Union, List
+from typing import Tuple, Any, Generator, Union, List, cast, Callable
+
+import pagio
 
 from .. import const
 from .array import PGArray, parse_unquoted
-from ..common import ushort_struct, Format, ProtocolError
+from .conv_utils import comma
+from ..common import Format, ProtocolError, uint_from_bytes
 from ..const import (
     INT4ARRAYOID, BOOLARRAYOID, NUMERICARRAYOID, NUMRANGEOID, FLOAT8ARRAYOID,
     FLOAT4ARRAYOID,
 )
-from .conv_utils import simple_int
+from .conv_utils import simple_int, ResConverter, right_parens
 from .range import DiscreteRange, BasePGRange
 from .text import default_to_pg
 
@@ -30,18 +34,36 @@ def get_struct_unpacker(fmt: str) -> Any:
 
     _unpack = Struct(f"!{fmt}").unpack
 
-    def unpack_struct(conn, buf: memoryview) -> Any:
+    def unpack_struct(
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview) -> Any:
         return _unpack(buf)[0]
 
     return unpack_struct
 
 
+def get_int_to_python(
+        length: int, signed: bool = True,
+) -> Callable[['pagio.base_protocol._AbstractPGProtocol', memoryview], int]:
+
+    def int_to_python(
+            prot: 'pagio.base_protocol._AbstractPGProtocol',
+            buf: memoryview,
+    ) -> int:
+        if len(buf) != length:
+            raise ProtocolError("Invalid int length.")
+        return int.from_bytes(buf, "big", signed=signed)
+
+    return int_to_python
+
+
 # ======== int ============================================================== #
 
-bin_int2_to_python = get_struct_unpacker("h")
-bin_int_to_python = get_struct_unpacker("i")
-bin_uint_to_python = get_struct_unpacker("I")
-bin_int8_to_python = get_struct_unpacker("q")
+bin_int2_to_python: ResConverter[int] = get_int_to_python(length=2)
+bin_int_to_python: ResConverter[int] = get_int_to_python(length=4)
+bin_uint_to_python: ResConverter[int] = get_int_to_python(
+    length=4, signed=False)
+bin_int8_to_python: ResConverter[int] = get_int_to_python(length=8)
 
 
 def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
@@ -53,7 +75,10 @@ def int_to_pg(val: int) -> Tuple[int, str, Union[int, bytes], int, Format]:
     return default_to_pg(val)
 
 
-def txt_intvector_to_python(prot, buf: memoryview) -> List[int]:
+def txt_intvector_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> List[int]:
     return [int(v) for v in decode(buf).split(' ')]
 
 
@@ -65,22 +90,25 @@ def float_to_pg(val: float) -> Tuple[int, str, float, int, Format]:
     return const.FLOAT8OID, "d", val, 8, Format.BINARY
 
 
-def txt_float4_to_python(conn, buf: memoryview) -> float:
-    val = float(buf)
-
+def txt_float4_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> float:
     # force float4 to float8 conversion to get exactly the same value as the
     # binary converter and the C extension values
-    bin_val = struct.pack("f", val)
-    return struct.unpack("f", bin_val)[0]
+    return c_float(float(buf)).value
 
 
-bin_float4_to_python = get_struct_unpacker("f")
-bin_float8_to_python = get_struct_unpacker("d")
+bin_float4_to_python: ResConverter[float] = get_struct_unpacker("f")
+bin_float8_to_python: ResConverter[float] = get_struct_unpacker("d")
 
 # ======== numeric ========================================================== #
 
 
-def txt_numeric_to_python(conn, buf: memoryview) -> Decimal:
+def txt_numeric_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Decimal:
     """ Converts a PG numeric text value to a Python Decimal """
     return Decimal(decode(buf))
 
@@ -93,7 +121,10 @@ NUMERIC_PINF = 0xD000
 NUMERIC_NINF = 0xF000
 
 
-def bin_numeric_to_python(conn, buf: memoryview) -> Decimal:
+def bin_numeric_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Decimal:
     """ Converts a PG numeric binary value to a Python Decimal """
 
     npg_digits, weight, sign, _ = numeric_header.unpack_from(buf)
@@ -114,7 +145,7 @@ def bin_numeric_to_python(conn, buf: memoryview) -> Decimal:
 
     def get_digits() -> Generator[int, None, None]:
         for i in range(npg_digits):
-            [pg_digit] = ushort_struct.unpack_from(buf, i * 2)
+            pg_digit = uint_from_bytes(buf[i * 2: i * 2 + 2])
             if pg_digit > 9999:
                 raise ValueError("Invalid value")
             # a postgres digit contains 4 decimal digits
@@ -201,7 +232,7 @@ def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
     npg_digits = len(pg_digits)
     byte_val = struct.pack(
         "!HhHH" + npg_digits * "H",
-        *(npg_digits, pg_weight, pg_sign, pg_scale, *pg_digits))
+        npg_digits, pg_weight, pg_sign, pg_scale, *pg_digits)
     len_val = len(byte_val)
     return const.NUMERICOID, f"{len_val}s", byte_val, len_val, Format.BINARY
 
@@ -218,7 +249,10 @@ class PGNumRange(BasePGRange[Decimal]):
 # ======== bool ============================================================= #
 
 
-def bin_bool_to_python(conn, buf: memoryview) -> bool:
+def bin_bool_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> bool:
     """ Converts PG binary bool value to Python bool. """
     if buf == b'\x01':
         return True
@@ -227,7 +261,10 @@ def bin_bool_to_python(conn, buf: memoryview) -> bool:
     raise ProtocolError("Invalid value for bool")
 
 
-def text_bool_to_python(conn, buf: memoryview) -> bool:
+def text_bool_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> bool:
     """ Converts PG textual bool value to Python bool. """
     if buf == b't':
         return True
@@ -244,11 +281,12 @@ def bool_to_pg(val: bool) -> Tuple[int, str, bool, int, Format]:
 # ======== tid ============================================================== #
 
 left_parens = ord('(')
-comma = ord(',')
-right_parens = ord(')')
 
 
-def txt_tid_to_python(prot, buf: memoryview) -> Tuple[int, int]:
+def txt_tid_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Tuple[int, int]:
     if buf[0] != left_parens:
         raise ProtocolError("Invalid tid value.")
     pos = 1
@@ -260,14 +298,21 @@ def txt_tid_to_python(prot, buf: memoryview) -> Tuple[int, int]:
     pos += 1
     if pos != len(buf):
         raise ProtocolError("Invalid tid value.")
+    if num1 is None or num2 is None:
+        raise ProtocolError("Invalid tid value.")
     return num1, num2
 
 
-tid_struct = struct.Struct("!LH")
+tid_struct_unpack: Callable[
+    [memoryview], Tuple[int, int]
+] = struct.Struct("!LH").unpack  # type: ignore
 
 
-def bin_tid_to_python(prot, buf: memoryview) -> Tuple[int, int]:
-    return tid_struct.unpack(buf)
+def bin_tid_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Tuple[int, int]:
+    return tid_struct_unpack(buf)
 
 
 # ======== arrays =========================================================== #

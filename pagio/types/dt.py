@@ -4,11 +4,13 @@ from codecs import decode
 from datetime import (
     date, datetime, time, timedelta, timezone, tzinfo as dt_tzinfo)
 import re
-from struct import Struct
+from struct import pack
 from typing import Union, Tuple, Optional, Any
 
+import pagio
+
 from .array import PGArray
-from ..common import ProtocolError, Format
+from ..common import ProtocolError, Format, int_from_bytes, int4_to_bytes
 from ..const import (
     DATEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMEOID, TIMETZOID, INTERVALOID,
     TIMESTAMPARRAYOID, TIMESTAMPTZARRAYOID, DATEARRAYOID, TIMEARRAYOID,
@@ -31,10 +33,13 @@ __all__ = [
 # ======== date ============================================================= #
 
 
-def txt_date_to_python(conn, buf: memoryview) -> Union[str, date]:
+def txt_date_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, date]:
     """ Converts PG textual date value to Python date """
     date_str = decode(buf)
-    if conn._iso_dates and len(date_str) == 10:
+    if prot._iso_dates and len(date_str) == 10:
         return date.fromisoformat(date_str)
     return date_str
 
@@ -71,10 +76,13 @@ def _date_vals_from_int(julian_day: int) -> Tuple[int, int, int]:
     return year_val - 4800, (quad + 10) % 12 + 1,  julian - 7834 * quad // 256
 
 
-def bin_date_to_python(conn, buf: memoryview) -> Union[str, date]:
+def bin_date_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, date]:
     """ Converts PG binary date value to Python date """
 
-    pg_ordinal = bin_int_to_python(conn, buf)
+    pg_ordinal = bin_int_to_python(prot, buf)
 
     if MIN_PG_ORDINAL <= pg_ordinal <= MAX_PG_ORDINAL:
         # within Python date range
@@ -139,7 +147,10 @@ def time_vals_from_txt(time_str: str) -> Tuple[int, int, int, int]:
     return hour, int(match.group(2)), int(match.group(3)), usec
 
 
-def txt_time_to_python(conn, buf: memoryview) -> time:
+def txt_time_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> time:
     """ Converts PG textual time value to Python time """
     time_str = decode(buf)
     hour, minute, second, usec = time_vals_from_txt(time_str)
@@ -159,14 +170,16 @@ def _time_vals_from_int(time_val: int) -> Tuple[int, int, int, int]:
     return hour, minute, second, usec
 
 
-def bin_time_to_python(conn, buf: memoryview) -> time:
+def bin_time_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> time:
     """ Converts PG binary time value to Python time """
 
-    value = bin_int8_to_python(conn, buf)
+    value = bin_int8_to_python(prot, buf)
     return time(*_time_vals_from_int(value))
 
 
-timetz_struct_pack = Struct("!qi").pack
 MIN_TZ_OFFSET_SECS = -16 * 60 * 60
 MAX_TZ_OFFSET_SECS = 16 * 60 * 60
 
@@ -174,25 +187,22 @@ MAX_TZ_OFFSET_SECS = 16 * 60 * 60
 def time_to_pg(val: time) -> Tuple[int, str, Any, int, Format]:
     """ Converts Python time value to PG time parameter """
 
-    pg_val: Union[int, bytes] = (
+    pg_int_val = (
         val.hour * USECS_PER_HOUR + val.minute * USECS_PER_MINUTE +
         val.second * USECS_PER_SEC + val.microsecond)
     utc_offset = val.utcoffset()
 
     if utc_offset is None:
-        oid = TIMEOID
-        fmt = "q"
-        val_len = 8
-    else:
-        offset_seconds = utc_offset.days * 86400 + utc_offset.seconds
-        if not MIN_TZ_OFFSET_SECS < offset_seconds < MAX_TZ_OFFSET_SECS:
-            # PG supports offset up to +/- 16 hours, bind as text
-            return default_to_pg(val)
-        oid = TIMETZOID
-        fmt = "12s"
-        val_len = 12
-        pg_val = timetz_struct_pack(pg_val, -offset_seconds)
-    return oid, fmt, pg_val, val_len, Format.BINARY
+        return TIMEOID, "q", pg_int_val, 8, Format.BINARY
+
+    offset_seconds = utc_offset.days * 86400 + utc_offset.seconds
+    if not MIN_TZ_OFFSET_SECS < offset_seconds < MAX_TZ_OFFSET_SECS:
+        # PG supports offset up to +/- 16 hours, bind as text
+        return default_to_pg(val)
+
+    pg_val = (pg_int_val.to_bytes(8, "big", signed=True) +
+              int4_to_bytes(-offset_seconds))
+    return TIMETZOID, "12s", pg_val, 12, Format.BINARY
 
 # ======== timetz =========================================================== #
 
@@ -202,7 +212,10 @@ timetz_re = re.compile(
     r"([-+])(\d{2})(?::(\d{2})(?::(\d{2}))?)?$")
 
 
-def txt_timetz_to_python(conn, buf: memoryview) -> time:
+def txt_timetz_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> time:
     """ Converts PG textual timetz value to Python time with timezone """
 
     time_str = decode(buf)
@@ -230,12 +243,15 @@ def txt_timetz_to_python(conn, buf: memoryview) -> time:
         raise ProtocolError("Invalid PG time value") from ex
 
 
-timetz_struct = Struct("!qi")
-
-
-def bin_timetz_to_python(conn, buf: memoryview) -> time:
+def bin_timetz_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> time:
     """ Converts PG binary timetz value to Python time with timezone """
-    time_val, tz_val = timetz_struct.unpack(buf)
+    if len(buf) != 12:
+        raise ProtocolError("Invalid binary timetz value.")
+    time_val = int_from_bytes(buf[:8])
+    tz_val = int_from_bytes(buf[8:])
     return time(
         *_time_vals_from_int(time_val),
         tzinfo=timezone(timedelta(seconds=-tz_val)))
@@ -248,14 +264,17 @@ timestamp_re = re.compile(
     re.ASCII)
 
 
-def txt_timestamp_to_python(conn, buf: memoryview) -> Union[str, datetime]:
+def txt_timestamp_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
     # String is in the form "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}][ BC]
     # Python datetime range can only handle 4 digit year without 'BC' suffix
     ts_str = decode(buf)
 
-    if not conn._iso_dates:
+    if not prot._iso_dates:
         return ts_str
 
     match = timestamp_re.match(ts_str)
@@ -281,16 +300,19 @@ timestamptz_re = re.compile(
     re.ASCII)
 
 
-def txt_timestamptz_to_python(conn, buf: memoryview) -> Union[str, datetime]:
+def txt_timestamptz_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, datetime]:
     """ Converts PG textual timestamp value in ISO format to Python datetime.
     """
     # String is in the form
     # "YYYY[YY..]-MM-DD HH:MM:SS[.U{1,6}](-+)HH[:MM[:SS]][ BC]"
     # Python datetime range can only handle 4 digit year without 'BC' suffix
     ts_str = decode(buf)
-    if not conn._iso_dates:
+    if not prot._iso_dates:
         return ts_str
-    tzinfo = conn._tzinfo
+    tzinfo = prot._tzinfo
 
     match = timestamptz_re.match(ts_str)
     if match:
@@ -318,9 +340,12 @@ def txt_timestamptz_to_python(conn, buf: memoryview) -> Union[str, datetime]:
     return ts_str
 
 
-def bin_timestamp_to_python(conn, buf: memoryview) -> Union[str, datetime]:
+def bin_timestamp_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, datetime]:
     """ Converts PG binary timestamp value to Python datetime """
-    value = bin_int8_to_python(conn, buf)
+    value = bin_int8_to_python(prot, buf)
 
     # special values
     if value == 0x7FFFFFFFFFFFFFFF:
@@ -355,9 +380,12 @@ def bin_timestamp_to_python(conn, buf: memoryview) -> Union[str, datetime]:
         f"{usec_str}{bc_suffix}")
 
 
-def bin_timestamptz_to_python(conn, buf: memoryview) -> Union[str, datetime]:
+def bin_timestamptz_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[str, datetime]:
     """ Converts PG binary timestamp value to Python datetime """
-    value = bin_int8_to_python(conn, buf)
+    value = bin_int8_to_python(prot, buf)
 
     # special values
     if value == 0x7FFFFFFFFFFFFFFF:
@@ -365,7 +393,7 @@ def bin_timestamptz_to_python(conn, buf: memoryview) -> Union[str, datetime]:
     if value == -0x8000000000000000:
         return '-infinity'
 
-    tzinfo = conn._tzinfo
+    tzinfo = prot._tzinfo
     if MIN_PG_TIMESTAMP <= value <= MAX_PG_TIMESTAMP:
         # UTC value is within Python range
         pg_ordinal, time_val = divmod(value, USECS_PER_DAY)
@@ -390,18 +418,19 @@ def bin_timestamptz_to_python(conn, buf: memoryview) -> Union[str, datetime]:
         else:
             dt_to_use = datetime.max
         utc_offset = tzinfo.utcoffset(dt_to_use)
-        utc_offset_usec = (
-            utc_offset.days * USECS_PER_DAY +
-            utc_offset.seconds * USECS_PER_SEC + utc_offset.microseconds)
-        adj_value = value + utc_offset_usec
+        if utc_offset is not None:
+            utc_offset_usec = (
+                utc_offset.days * USECS_PER_DAY +
+                utc_offset.seconds * USECS_PER_SEC + utc_offset.microseconds)
+            adj_value = value + utc_offset_usec
 
-        if MIN_PG_TIMESTAMP <= adj_value <= MAX_PG_TIMESTAMP:
-            # Adjusted value is within range. Use that with provided timezone
-            pg_ordinal, time_val = divmod(adj_value, USECS_PER_DAY)
-            hour, minute, sec, usec = _time_vals_from_int(time_val)
-            return datetime.combine(
-                date.fromordinal(pg_ordinal + DATE_OFFSET),
-                time(hour, minute, sec, usec), tzinfo=tzinfo)
+            if MIN_PG_TIMESTAMP <= adj_value <= MAX_PG_TIMESTAMP:
+                # Adjusted value is within range. Use that with provided timezone
+                pg_ordinal, time_val = divmod(adj_value, USECS_PER_DAY)
+                hour, minute, sec, usec = _time_vals_from_int(time_val)
+                return datetime.combine(
+                    date.fromordinal(pg_ordinal + DATE_OFFSET),
+                    time(hour, minute, sec, usec), tzinfo=tzinfo)
 
     # Outside python date range, convert to a string identical to PG ISO text
     # format
@@ -466,10 +495,13 @@ class PGTimestampTZRange(BasePGRange[datetime]):
 # ======== interval ========================================================= #
 
 
-def txt_interval_to_python(conn, buf: memoryview) -> Tuple[int, timedelta]:
+def txt_interval_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Union[Tuple[int, timedelta], str]:
 
     str_val = decode(buf)
-    if conn._interval_style != "postgres":
+    if prot._interval_style != "postgres":
         return str_val
 
     parts = str_val.split(" ")
@@ -500,18 +532,23 @@ def txt_interval_to_python(conn, buf: memoryview) -> Tuple[int, timedelta]:
         day, hours=hour, minutes=minute, seconds=second, microseconds=usec)
 
 
-interval_struct = Struct("!qii")
-
-
-def bin_interval_to_python(conn, buf: memoryview):
-    time_val, days, months = interval_struct.unpack(buf)
+def bin_interval_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Tuple[int, timedelta]:
+    if len(buf) != 16:
+        raise ProtocolError("Invalid binary interval value.")
+    time_val = int_from_bytes(buf[:8])
+    days = int_from_bytes(buf[8:12])
+    months = int_from_bytes(buf[12:])
     return months, timedelta(days, microseconds=time_val)
 
 
-def timedelta_to_pg(val: timedelta) -> Tuple[int, str, int, int, Format]:
-    val = interval_struct.pack(
-        val.seconds * USECS_PER_SEC + val.microseconds, val.days, 0)
-    return INTERVALOID, "16s", val, 16, Format.BINARY
+def timedelta_to_pg(val: timedelta) -> Tuple[int, str, bytes, int, Format]:
+
+    bin_val = pack(
+        "!qii", val.seconds * USECS_PER_SEC + val.microseconds, val.days, 0)
+    return INTERVALOID, "16s", bin_val, 16, Format.BINARY
 
 
 class PGTimestampArray(PGArray):

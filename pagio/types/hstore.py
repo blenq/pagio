@@ -1,25 +1,31 @@
 from codecs import decode
-from typing import Dict
+from typing import Dict, Optional
+
+import pagio
 
 from .array import quote, parse_quoted, parse_unquoted
+from .conv_utils import comma
 from .numeric import bin_int_to_python
 
 
-comma = ord(',')
 space = ord(' ')
 equals = ord('=')
 gt = ord('>')
 hstore_delims = (comma, 0)
 
 
-def txt_hstore_to_python(conn, buf: memoryview) -> Dict[str, str]:
+def txt_hstore_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Dict[str, Optional[str]]:
     pos = 0
     buf_len = len(buf)
     hstore_val = {}
     while pos < buf_len:
         if buf[pos] != quote:
             raise ValueError("Invalid hstore")
-        key, parse_pos = parse_quoted(buf[pos:], conn)
+        key: str
+        key, parse_pos = parse_quoted(buf[pos:], prot)
         pos += parse_pos
         if buf[pos] != equals:
             raise ValueError("Invalid hstore value.")
@@ -27,10 +33,11 @@ def txt_hstore_to_python(conn, buf: memoryview) -> Dict[str, str]:
         if buf[pos] != gt:
             raise ValueError("Invalid hstore value.")
         pos += 1
+        value: Optional[str]
         if buf[pos] == quote:
-            value, parse_pos = parse_quoted(buf[pos:], conn)
+            value, parse_pos = parse_quoted(buf[pos:], prot)
         else:
-            value, parse_pos = parse_unquoted(buf[pos:], hstore_delims, conn)
+            value, parse_pos = parse_unquoted(buf[pos:], hstore_delims, prot)
         pos += parse_pos
         hstore_val[key] = value
         if pos < buf_len:
@@ -42,21 +49,24 @@ def txt_hstore_to_python(conn, buf: memoryview) -> Dict[str, str]:
     return hstore_val
 
 
-def bin_hstore_to_python(conn, buf: memoryview) -> Dict[str, str]:
+def bin_hstore_to_python(
+        prot: 'pagio.base_protocol._AbstractPGProtocol',
+        buf: memoryview,
+) -> Dict[str, Optional[str]]:
     buf_len = len(buf)
     hstore_val = {}
     if buf_len < 4:
         raise ValueError("Invalid hstore value.")
-    num_vals = bin_int_to_python(conn, buf[:4])
+    num_vals = bin_int_to_python(prot, buf[:4])
     pos = 4
     while pos < buf_len:
-        item_len = bin_int_to_python(conn, buf[pos:pos + 4])
+        item_len = bin_int_to_python(prot, buf[pos:pos + 4])
         pos += 4
         if item_len < 0:
             raise ValueError("Invalid hstore value")
         key = decode(buf[pos:pos + item_len])
         pos += item_len
-        item_len = bin_int_to_python(conn, buf[pos:pos + 4])
+        item_len = bin_int_to_python(prot, buf[pos:pos + 4])
         pos += 4
         if item_len == -1:
             val = None
