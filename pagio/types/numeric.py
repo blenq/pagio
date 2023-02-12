@@ -365,3 +365,7 @@ class PGInt8Range(PGIntRange):
 
     _min_value = INT64_MIN
     _max_value = INT64_MAX
+
+
+class PGInt8MultiRange(BaseMultiRange[int]):
+    range_class = PGInt8Range

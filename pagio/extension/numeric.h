@@ -11,10 +11,12 @@
 #define INT4ARRAYOID 1007
 #define INT4RANGEOID 3904
 #define INT4RANGEARRAYOID 3905
+#define INT4MULTIRANGEOID 4451
 #define INT8OID 20
 #define INT8ARRAYOID 1016
 #define INT8RANGEOID 3926
 #define INT8RANGEARRAYOID 3927
+#define INT8MULTIRANGEOID 4536
 
 #define BOOLOID 16
 #define BOOLARRAYOID 1000
@@ -92,6 +94,8 @@ PyObject *convert_pg_int4_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int4array_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int4range_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int4rangearray_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_int4multirange_txt(PPObject *self, char *buf, int len);
+PyObject *convert_pg_int4multirange_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_uint4_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_oidarray_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_oidvectorarray_bin(PPObject *self, char *buf, int len);
@@ -108,6 +112,9 @@ PyObject *convert_pg_int8range_txt(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int8range_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int8rangearray_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_int8rangearray_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_int8multirange_txt(PPObject *self, char *buf, int len);
+PyObject *convert_pg_int8multirange_bin(PPObject *self, char *buf, int len);
+
 
 int fill_long_info(
     ParamInfo *param_info, unsigned int *oid, short *p_fmt, PyObject *param);

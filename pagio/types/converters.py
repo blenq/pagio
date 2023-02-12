@@ -76,6 +76,8 @@ PGTypes = {
         simple_int, numeric.bin_int8_to_python, array_oid=const.INT8ARRAYOID,
         range_oid=const.INT8RANGEOID, range_class=numeric.PGInt8Range,
         range_array_oid=const.INT8RANGEARRAYOID,
+        multirange_oid=const.INT8MULTIRANGEOID,
+        multirange_class=numeric.PGInt8MultiRange,
     ),
     const.OIDOID: PGTypeInfo(
         simple_int, numeric.bin_uint_to_python, array_oid=const.OIDARRAYOID,

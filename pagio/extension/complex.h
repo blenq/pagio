@@ -13,6 +13,14 @@ PyObject *parse_range_text(
 PyObject *parse_range_binary(
     PPObject *self, char *buf, char *end, res_converter conv,
     PyObject *range_type);
+PyObject *parse_multirange_text(
+    PPObject *self, char *buf, char *end, res_converter conv,
+    PyObject *multirange_type);
+PyObject *parse_multirange_bin(
+    PPObject *self, char *buf, char *end, res_converter conv,
+    PyObject *multirange_type);
+
+
 
 PyObject *parse_unquoted(
     PPObject *self, char **buf, char *end, char *delims, res_converter conv);

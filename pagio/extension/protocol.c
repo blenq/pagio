@@ -298,6 +298,8 @@ get_converters(unsigned int type_oid) {
             convert_pg_int4range_txt, convert_pg_int4range_bin},
         int4rangearray_converters[2] = {
             convert_pg_int4rangearray_text, convert_pg_int4rangearray_bin},
+        int4multirange_converters[2] = {
+            convert_pg_int4multirange_txt, convert_pg_int4multirange_bin},
         int8_converters[2] = {convert_pg_int_text, convert_pg_int8_bin},
         int8array_converters[2] = {
             convert_pg_intarray_text, convert_pg_int8array_bin},
@@ -305,7 +307,8 @@ get_converters(unsigned int type_oid) {
             convert_pg_int8range_txt, convert_pg_int8range_bin},
         int8rangearray_converters[2] = {
             convert_pg_int8rangearray_text, convert_pg_int8rangearray_bin},
-
+        int8multirange_converters[2] = {
+            convert_pg_int8multirange_txt, convert_pg_int8multirange_bin},
         uint4_converters[2] = {convert_pg_int_text, convert_pg_uint4_bin},
         oidarray_converters[2] = {
             convert_pg_intarray_text, convert_pg_oidarray_bin},
@@ -430,6 +433,8 @@ get_converters(unsigned int type_oid) {
         return int4range_converters;
     case INT4RANGEARRAYOID:
         return int4rangearray_converters;
+    case INT4MULTIRANGEOID:
+        return int4multirange_converters;
     case INT8OID:
         return int8_converters;
     case INT8ARRAYOID:
@@ -438,6 +443,8 @@ get_converters(unsigned int type_oid) {
         return int8range_converters;
     case INT8RANGEARRAYOID:
         return int8rangearray_converters;
+    case INT8MULTIRANGEOID:
+        return int8multirange_converters;
     case OIDOID:
     case XIDOID:
     case CIDOID:

@@ -2,7 +2,9 @@
 
 from .types.numeric import (
     PGInt4Array, PGBoolArray, PGNumericArray, PGInt4Range, PGInt8Range,
-    PGNumRange, PGFloat8Array, PGFloat4Array, PGInt4MultiRange)
+    PGNumRange, PGFloat8Array, PGFloat4Array, PGInt4MultiRange,
+    PGInt8MultiRange,
+)
 from .types.dt import (
     PGTimestampArray, PGTimestampTZArray, PGDateArray, PGTimeArray,
     PGTimestampTZRange, PGDateRange, PGTimestampRange,

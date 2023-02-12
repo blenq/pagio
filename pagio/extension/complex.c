@@ -312,27 +312,27 @@ convert_pg_array_bin(
 
 
 PyObject *
-parse_range_text(
-    PPObject *self, char *buf, char *end, res_converter conv,
+_parse_range_text(
+    PPObject *self, char **pos, char *end, res_converter conv,
     PyObject *range_type)
 {
     PyObject *py_lower, *py_upper, *py_bounds, *py_range;
-    char *pos, bounds[2];
+    char bounds[2];
 
-    pos = buf;
-    if (end == pos) {
+    if (end == *pos) {
         PyErr_SetString(PyExc_ValueError, "Invalid range value.");
         return NULL;
     }
-    if (pos[0] == 'e') {
+    if (**pos == 'e') {
         // special case 'empty'
-        if (end - pos == 5 && memcmp(pos, "empty", 5) == 0) {
+        if (end - *pos >= 5 && memcmp(*pos, "empty", 5) == 0) {
             py_lower = Py_None;
             Py_INCREF(py_lower);
             py_upper = Py_None;
             Py_INCREF(py_upper);
             py_bounds = Py_None;
             Py_INCREF(py_bounds);
+            *pos += 5;
         }
         else {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
@@ -341,55 +341,53 @@ parse_range_text(
     }
     else {
         // lower bound
-        if (pos[0] == '[' || pos[0] == '(') {
-            bounds[0] = pos[0];
-        }
-        else {
+        if (**pos != '[' && **pos != '(') {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
             return NULL;
         }
-        pos += 1;
+        bounds[0] = **pos;
+        *pos += 1;
 
         // lower value
-        if (end == pos) {
+        if (end == *pos) {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
             return NULL;
         }
-        if (pos[0] == ',') {
+        if (**pos == ',') {
             py_lower = Py_None;
             Py_INCREF(py_lower);
         }
-        else if (pos[0] == '"') {
-            py_lower = parse_quoted(self, &pos, end, conv);
+        else if (**pos == '"') {
+            py_lower = parse_quoted(self, pos, end, conv);
         }
         else {
-            py_lower = parse_unquoted(self, &pos, end, ",", conv);
+            py_lower = parse_unquoted(self, pos, end, ",", conv);
         }
         if (py_lower == NULL) {
             return NULL;
         }
 
         // delimiter
-        if (pos == end || pos[0] != ',') {
+        if (*pos == end || **pos != ',') {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
             return NULL;
         }
-        pos += 1;
+        *pos += 1;
 
         // upper value
-        if (pos == end) {
+        if (*pos == end) {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
             return NULL;
         }
-        if (pos[0] == ']' || pos[0] == ')') {
+        if (**pos == ']' || **pos == ')') {
             py_upper = Py_None;
             Py_INCREF(py_upper);
         }
-        else if (pos[0] == '"') {
-            py_upper = parse_quoted(self, &pos, end, conv);
+        else if (**pos == '"') {
+            py_upper = parse_quoted(self, pos, end, conv);
         }
         else {
-            py_upper = parse_unquoted(self, &pos, end, "])", conv);
+            py_upper = parse_unquoted(self, pos, end, "])", conv);
         }
         if (py_upper == NULL) {
             Py_DECREF(py_lower);
@@ -397,16 +395,14 @@ parse_range_text(
         }
 
         // upper bound
-        if (pos == end || (pos[0] != ']' && pos[0] != ')')) {
+        if (*pos == end || (**pos != ']' && **pos != ')')) {
             PyErr_SetString(PyExc_ValueError, "Invalid range value.");
+            Py_DECREF(py_lower);
+            Py_DECREF(py_upper);
             return NULL;
         }
-        bounds[1] = pos[0];
-
-        if (pos + 1 != end) {
-            PyErr_SetString(PyExc_ValueError, "Invalid range value.");
-            return NULL;
-        }
+        bounds[1] = **pos;
+        *pos += 1;
 
         // python bound string
         py_bounds = PyUnicode_FromStringAndSize(bounds, 2);
@@ -422,6 +418,112 @@ parse_range_text(
     Py_DECREF(py_upper);
     Py_DECREF(py_bounds);
     return py_range;
+}
+
+
+PyObject *
+parse_range_text(
+    PPObject *self, char *buf, char *end, res_converter conv,
+    PyObject *range_type)
+{
+    PyObject *py_range;
+    char *pos;
+
+    pos = buf;
+    py_range = _parse_range_text(self, &pos, end, conv, range_type);
+    if (py_range == NULL) {
+        return NULL;
+    }
+    if (pos != end) {
+        Py_DECREF(py_range);
+        PyErr_SetString(PyExc_ValueError, "Invalid range value.");
+        return NULL;
+    }
+    return py_range;
+}
+
+
+PyObject *
+parse_multirange_text(
+    PPObject *self, char *buf, char *end, res_converter conv,
+    PyObject *multirange_type)
+{
+    PyObject *range_type = NULL;
+    PyObject *ranges = NULL;
+    PyObject *py_range;
+    PyObject *py_multirange;
+    PyObject *args = NULL;
+    char *pos;
+
+    pos = buf;
+
+    if (end == pos || pos[0] != '{') {
+        PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+        return NULL;
+    }
+    pos += 1;
+    if (end == pos) {
+        PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+        return NULL;
+    }
+
+    ranges = PyList_New(0);
+    if (ranges == NULL) {
+        return NULL;
+    }
+    if (pos[0] == '}') {
+        pos += 1;
+    }
+    else {
+        range_type = PyObject_GetAttrString(multirange_type, "range_class");
+        if (range_type == NULL) {
+            goto error;
+        }
+        while (1) {
+            int ret;
+            char curr_char;
+            py_range = _parse_range_text(self, &pos, end, conv, range_type);
+            if (py_range == NULL) {
+                goto error;
+            }
+            ret = PyList_Append(ranges, py_range);
+            Py_DECREF(py_range);
+            if (ret == -1) {
+                goto error;
+            }
+            if (end == pos) {
+                PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+                goto error;
+            }
+            curr_char = pos[0];
+            pos += 1;
+            if (curr_char == '}') {
+                break;
+            }
+            if (curr_char != ',') {
+                PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+                goto error;
+            }
+        }
+        Py_CLEAR(range_type);
+    }
+    if (pos != end) {
+        PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+        goto error;
+    }
+    args = PyList_AsTuple(ranges);
+    if (args == NULL) {
+        goto error;
+    }
+    Py_CLEAR(ranges);
+    py_multirange = PyObject_Call(multirange_type, args, NULL);
+    Py_DECREF(args);
+    return py_multirange;
+
+error:
+    Py_DECREF(ranges);
+    Py_XDECREF(range_type);
+    return NULL;
 }
 
 
@@ -487,6 +589,9 @@ parse_range_binary(
                 return NULL;
             }
             py_lower = conv(self, pos, val_len);
+            if (py_lower == NULL) {
+                return NULL;
+            }
             pos += val_len;
         }
         if (flags & RANGE_UB_INF) {
@@ -506,6 +611,9 @@ parse_range_binary(
                 return NULL;
             }
             py_upper = conv(self, pos, val_len);
+            if (py_upper == NULL) {
+                Py_DECREF(py_lower);
+            }
             pos += val_len;
         }
         // python bound string
@@ -528,4 +636,82 @@ parse_range_binary(
     Py_DECREF(py_upper);
     Py_DECREF(py_bounds);
     return py_range;
+}
+
+
+PyObject *
+parse_multirange_bin(
+    PPObject *self, char *buf, char *end, res_converter conv,
+    PyObject *multirange_type)
+{
+    uint32_t num_ranges, i;
+    char *pos;
+    PyObject *ranges;
+    PyObject *range_type = NULL;
+    PyObject *py_multirange;
+
+    pos = buf;
+
+    // read number of ranges
+    if (read_uint(&pos, end, &num_ranges) == -1) {
+        return NULL;
+    }
+
+    // create tuple for ranges
+    ranges = PyTuple_New(num_ranges);
+    if (ranges == NULL) {
+        return NULL;
+    }
+
+    if (num_ranges) {
+        // setup for reading ranges
+        PyObject *py_range;
+        range_type = PyObject_GetAttrString(multirange_type, "range_class");
+        if (range_type == NULL) {
+            goto error;
+        }
+
+        // read ranges
+        for (i = 0; i < num_ranges; i++) {
+            // read length of range
+            uint32_t range_len;
+            if (read_uint(&pos, end, &range_len) == -1) {
+                goto error;
+            }
+
+            // check if length fits in buffer
+            if (pos + range_len > end) {
+                PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+                goto error;
+            }
+
+            // parse range
+            py_range = parse_range_binary(
+                self, pos, pos + range_len, conv, range_type);
+            if (py_range == NULL) {
+                goto error;
+            }
+            pos += range_len;
+
+            // add range to tuple
+            PyTuple_SET_ITEM(ranges, i, py_range);
+        }
+        Py_CLEAR(range_type);
+    }
+
+    // check end of buffer reached
+    if (pos != end) {
+        PyErr_SetString(PyExc_ValueError, "Invalid multirange value.");
+        goto error;
+    }
+
+    // instantiate and return multirange
+    py_multirange = PyObject_Call(multirange_type, ranges, NULL);
+    Py_DECREF(ranges);
+    return py_multirange;
+
+error:
+    Py_DECREF(ranges);
+    Py_XDECREF(range_type);
+    return NULL;
 }

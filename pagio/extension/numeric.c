@@ -937,7 +937,9 @@ convert_pg_tidarray_bin(PPObject *self, char *buf, int len)
 // ================ ranges ================================================= //
 
 static PyObject *PGInt4Range;
+static PyObject *PGInt4MultiRange;
 static PyObject *PGInt8Range;
+static PyObject *PGInt8MultiRange;
 static PyObject *PGNumRange;
 
 PyObject *
@@ -971,6 +973,22 @@ convert_pg_int4rangearray_bin(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_int4multirange_txt(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_text(
+        self, buf, buf + len, convert_pg_int_text, PGInt4MultiRange);
+}
+
+
+PyObject *
+convert_pg_int4multirange_bin(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_bin(
+        self, buf, buf + len, convert_pg_int4_bin, PGInt4MultiRange);
+}
+
+
+PyObject *
 convert_pg_int8range_txt(PPObject *self, char *buf, int len) {
     return parse_range_text(
         self, buf, buf + len, convert_pg_int_text, PGInt8Range);
@@ -997,6 +1015,22 @@ convert_pg_int8rangearray_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_bin(
         self, buf, len, INT8RANGEOID, convert_pg_int8range_bin);
+}
+
+
+PyObject *
+convert_pg_int8multirange_txt(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_text(
+        self, buf, buf + len, convert_pg_int_text, PGInt8MultiRange);
+}
+
+
+PyObject *
+convert_pg_int8multirange_bin(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_bin(
+        self, buf, buf + len, convert_pg_int8_bin, PGInt8MultiRange);
 }
 
 
@@ -1067,10 +1101,13 @@ init_numeric(void)
         return -1;
     }
     PGInt4Range = PyObject_GetAttrString(module, "PGInt4Range");
+    PGInt4MultiRange = PyObject_GetAttrString(module, "PGInt4MultiRange");
     PGInt8Range = PyObject_GetAttrString(module, "PGInt8Range");
+    PGInt8MultiRange = PyObject_GetAttrString(module, "PGInt8MultiRange");
     PGNumRange = PyObject_GetAttrString(module, "PGNumRange");
     Py_DECREF(module);
-    if (PGInt4Range == NULL || PGInt8Range == NULL || PGNumRange == NULL) {
+    if (PGInt4Range == NULL || PGInt8Range == NULL || PGNumRange == NULL ||
+            PGInt4MultiRange == NULL || PGInt8MultiRange == NULL) {
         return -1;
     }
 

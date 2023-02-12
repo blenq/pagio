@@ -647,12 +647,12 @@ class TxtMultiRangeResultConverter(Generic[T]):
                     prot, buf[pos:])
                 ranges.append(new_range)
                 pos += chars_read
-                if buf[pos] == ord('}'):
-                    pos += 1
-                    break
-                if buf[pos] != comma:
-                    raise ValueError("Invalid multirange value.")
+                curr_char = buf[pos]
                 pos += 1
+                if curr_char == ord('}'):
+                    break
+                if curr_char != comma:
+                    raise ValueError("Invalid multirange value.")
         if pos != len(buf):
             raise ValueError("Invalid textual multirange value.")
         return self.multirange_class(*ranges)
