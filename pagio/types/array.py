@@ -51,10 +51,12 @@ def parse_unquoted(
         converter: ResConverter[T] = simple_decode,  # type: ignore
 ) -> Tuple[Optional[T], int]:
     pos = 0
+    # for pos, c in enumerate(buf):
+    #     if c in delims:
+    #         break
     buf_len = len(buf)
     while pos < buf_len:
-        char = buf[pos]
-        if char in delims:
+        if buf[pos] in delims:
             break
         pos += 1
     else:

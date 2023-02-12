@@ -28,8 +28,6 @@ class AsyncConnection(BaseConnection):
 
 
     """
-    _protocol: AsyncPGProtocol
-
     def __init__(
             self,
             host: Optional[str] = None,
@@ -54,14 +52,16 @@ class AsyncConnection(BaseConnection):
             prepare_threshold=prepare_threshold, options=options,
             cache_size=cache_size,
         )
+        self._protocol: Optional[AsyncPGProtocol] = None
+        self._notify_queue: Optional['asyncio.Queue[Notification]'] = None
 
     def __await__(self) -> Generator[Any, None, 'AsyncConnection']:
         return self._connect(self._ssl_mode).__await__()
 
     @property
-    def notifications(self):  # type: () -> asyncio.Queue[Notification]
+    def notifications(self) -> Optional['asyncio.Queue[Notification]']:
         """ Notification queue """
-        return self._protocol.notify_queue
+        return self._notify_queue
 
     async def _connect_protocol(self, ssl_mode: SSLMode) -> AsyncPGProtocol:
         loop = asyncio.get_running_loop()
@@ -84,6 +84,7 @@ class AsyncConnection(BaseConnection):
         if self._protocol is not None:
             raise ValueError("Connection has been awaited already")
         self._protocol = await self._connect_protocol(ssl_mode)
+        self._notify_queue = self._protocol.notify_queue
         try:
             await self._protocol.startup(
                 self._user, self._database, "pagio", self._tz_name,
@@ -100,6 +101,9 @@ class AsyncConnection(BaseConnection):
 
     async def cancel(self) -> None:
         """ Cancels an executing statement. """
+
+        if self._protocol is None:
+            raise ValueError("Connection is closed.")
 
         if self.status is not ProtocolStatus.EXECUTING:
             # shortcut
@@ -132,6 +136,8 @@ class AsyncConnection(BaseConnection):
     ) -> ResultSet:
         """ Execute a query text and return the result """
 
+        if self._protocol is None:
+            raise ValueError("Connection is closed.")
         try:
             return await self._protocol.execute(
                 sql, parameters, result_format, raw_result, file_obj)
@@ -151,7 +157,10 @@ class AsyncConnection(BaseConnection):
 
     async def close(self) -> None:
         """ Closes the connection """
+        if self._protocol is None:
+            return
         await self._protocol.close()
+        self._protocol = None
 
     async def __aenter__(self) -> 'AsyncConnection':
         return self

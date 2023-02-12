@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pagio"
+description = "PostgreSQL client library"
+readme = "README.md"
+requires-python = ">=3.7"
+keywords = ["asyncio", "postgresql"]
+license = {text = "BSD 2-Clause License"}
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: SQL",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+]
+version = "0.2"
+dependencies = [
+    'scramp',
+    'backports.cached-property;python_version<"3.8"',
+    'backports.zoneinfo;python_version<"3.9"',
+    'typing_extensions;python_version<"3.11"',
+]
+
+[tool.setuptools]
+packages = ['pagio']
+
+[tool.coverage.run]
+branch = true
+command_line = "-m unittest"
+source = ["pagio"]
+
+[tool.mypy]
+packages = ['pagio']
+strict = true
+mypy_path = "stubs"
+
+[tool.pylint.main]
+disable = ["consider-using-assignment-expr"]
+load-plugins = [
+    "pylint.extensions.no_self_use",
+    "pylint.extensions.eq_without_hash",
+    "pylint.extensions.docparams",
+    "pylint.extensions.for_any_all",
+    "pylint.extensions.docstyle",
+    "pylint.extensions.private_import",
+    "pylint.extensions.redefined_loop_name",
+    "pylint.extensions.check_elif",
+    "pylint.extensions.overlapping_exceptions",
+    "pylint.extensions.comparetozero",
+    "pylint.extensions.set_membership",
+    "pylint.extensions.bad_builtin",
+    "pylint.extensions.mccabe",
+    "pylint.extensions.confusing_elif",
+    "pylint.extensions.comparison_placement",
+    "pylint.extensions.broad_try_clause",
+    "pylint.extensions.code_style",
+    "pylint.extensions.typing",
+    "pylint.extensions.emptystring",
+    ]
+
+[tool.pylint.design]
+max-args = 6

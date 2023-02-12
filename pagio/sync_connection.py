@@ -40,7 +40,7 @@ class Connection(BaseConnection):
             prepare_threshold=prepare_threshold, options=options,
             cache_size=cache_size,
         )
-        self._protocol: PGProtocol = self._connect(self._ssl_mode)
+        self._protocol: Optional[PGProtocol] = self._connect(self._ssl_mode)
         self._notifications = NotificationQueue(self._protocol)
 
     def _connect(self, ssl_mode: SSLMode) -> PGProtocol:
@@ -94,12 +94,17 @@ class Connection(BaseConnection):
             file_obj: Optional[SyncCopyFile] = None,
     ) -> ResultSet:
         """ Execute a query text and return the result """
+        if self._protocol is None:
+            raise ValueError("Connection is closed.")
         return self._protocol.execute(
             sql, parameters, result_format, raw_result, file_obj)
 
     def close(self) -> None:
         """ Closes the connection """
-        return self._protocol.close()
+        if self._protocol is None:
+            return
+        self._protocol.close()
+        self._protocol = None
 
     def __enter__(self) -> 'Connection':
         return self

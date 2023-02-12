@@ -314,9 +314,10 @@ class PyPGProtocol(PyBasePGProtocol, _PGProtocol):
 
 try:
     from ._pagio import CBasePGProtocol
+
+    class PGProtocol(CBasePGProtocol, _PGProtocol):
+        """ C accelerated synchronous version of PG protocol """
+
 except ImportError:
     # fallback to pure python
     PGProtocol = PyPGProtocol  # type: ignore
-else:
-    class PGProtocol(CBasePGProtocol, _PGProtocol):
-        """ C accelerated synchronous version of PG protocol """

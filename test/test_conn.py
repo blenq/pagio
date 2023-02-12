@@ -16,12 +16,15 @@ class ConnCase(unittest.TestCase):
     def test_af_unix_conn(self):
         cn = Connection(database="postgres")
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
+        self.assertIsInstance(cn.path, str)
         cn.close()
 
     def test_ip_conn(self):
         cn = Connection(
             host='localhost', database='postgres', password='hoi\uE100')
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
+        with self.assertRaises(ValueError):
+            cn.path
         cn.close()
 
     def test_ip_conn_no_ssl(self):
@@ -31,10 +34,18 @@ class ConnCase(unittest.TestCase):
         self.assertIs(cn.transaction_status, TransactionStatus.IDLE)
         cn.close()
 
+    def test_invalid_conn_params(self):
+        with self.assertRaises(ValueError):
+            Connection(database="postgres", cache_size=0)
+        with self.assertRaises(ValueError):
+            Connection(database="postgres", prepare_threshold=-1)
+
     def test_parameter_status(self):
         cn = Connection(database="postgres")
         self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
+        self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
         cn.close()
+        self.assertIsNone(cn.server_parameters.get("client_encoding"))
 
     def test_server_version(self):
         cn = Connection(database="postgres")
@@ -43,6 +54,8 @@ class ConnCase(unittest.TestCase):
         self.assertEqual(
             cn.server_version, int(m.group(1)) * 10000 + int(m.group(2)))
         cn.close()
+        with self.assertRaises(ValueError):
+            cn.server_version
 
     def test_simple_query(self):
         cn = Connection(database="postgres")
@@ -59,6 +72,7 @@ class ConnCase(unittest.TestCase):
         cn.close()
         cn.close()
         self.assertEqual(cn.status, ProtocolStatus.CLOSED)
+        self.assertEqual(cn.transaction_status, TransactionStatus.UNKNOWN)
 
     def test_wrong_db(self):
         with self.assertRaises(ServerError):

@@ -1,5 +1,5 @@
 from codecs import decode
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
 import pagio
 

@@ -17,7 +17,7 @@ from ..const import (
     FLOAT4ARRAYOID,
 )
 from .conv_utils import simple_int, ResConverter, right_parens
-from .range import DiscreteRange, BasePGRange
+from .range import DiscreteRange, BasePGRange, BaseMultiRange
 from .text import default_to_pg
 
 
@@ -29,7 +29,7 @@ INT64_MAX = 0x7FFFFFFFFFFFFFFF
 INT64_MIN = -0x8000000000000000
 
 
-def get_struct_unpacker(fmt: str) -> Any:
+def get_struct_unpacker(fmt: str) -> ResConverter[Any]:
     """ Creates a function to get a single value from a struct """
 
     _unpack = Struct(f"!{fmt}").unpack
@@ -42,9 +42,7 @@ def get_struct_unpacker(fmt: str) -> Any:
     return unpack_struct
 
 
-def get_int_to_python(
-        length: int, signed: bool = True,
-) -> Callable[['pagio.base_protocol._AbstractPGProtocol', memoryview], int]:
+def get_int_to_python(length: int, signed: bool = True) -> ResConverter[int]:
 
     def int_to_python(
             prot: 'pagio.base_protocol._AbstractPGProtocol',
@@ -357,6 +355,10 @@ class PGInt4Range(PGIntRange):
 
     _min_value = INT32_MIN
     _max_value = INT32_MAX
+
+
+class PGInt4MultiRange(BaseMultiRange[int]):
+    range_class = PGInt4Range
 
 
 class PGInt8Range(PGIntRange):

@@ -10,6 +10,7 @@ from pagio import (
     Connection, sync_connection, sync_protocol, Format, ServerError, PGJson,
     ServerWarning, PGTextArray, PGInt4Range, PGInt8Range, PGText, PGNumRange,
     PGTimestampTZRange, PGDateRange, PGRegConfig, ServerNotice,
+    PGInt4MultiRange,
 )
 from pagio.types import txt_hstore_to_python, bin_hstore_to_python
 from pagio.zoneinfo import ZoneInfo
@@ -706,6 +707,17 @@ class ConnTypeCase(unittest.TestCase):
         self._test_val_result(
             "SELECT ARRAY['[10, 2147483646]']::int4range[];",
             [PGInt4Range(10, 2147483647)])
+
+    def test_int4_multirange_result(self):
+        self._test_val_result(
+            "SELECT '{[10,11),[15,20)}'::int4multirange;",
+            PGInt4MultiRange((10, 11), (15, 20)))
+        self._test_val_result(
+            "SELECT '{empty}'::int4multirange;",
+            PGInt4MultiRange())
+        self._test_val_result(
+            "SELECT '{(,5),[10,15),[20,)}'::int4multirange;",
+            PGInt4MultiRange((None, 5), (10, 15), (20, None)))
 
     def test_int8_range_result(self):
         self._test_val_result(

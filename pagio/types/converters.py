@@ -31,6 +31,8 @@ class PGTypeInfo(NamedTuple):
     range_oid: Optional[int] = None  # range type identifier
     range_class: Optional[Type[range.BasePGRange[Any]]] = None  # client range class
     range_array_oid: Optional[int] = None  # range array type identifier
+    multirange_oid: Optional[int] = None
+    multirange_class: Optional[Type[range.BaseMultiRange[Any]]] = None
 
 
 PGTypes = {
@@ -67,6 +69,8 @@ PGTypes = {
         simple_int, numeric.bin_int_to_python, array_oid=const.INT4ARRAYOID,
         range_oid=const.INT4RANGEOID, range_class=numeric.PGInt4Range,
         range_array_oid=const.INT4RANGEARRAYOID,
+        multirange_oid=const.INT4MULTIRANGEOID,
+        multirange_class=numeric.PGInt4MultiRange,
     ),
     const.INT8OID: PGTypeInfo(
         simple_int, numeric.bin_int8_to_python, array_oid=const.INT8ARRAYOID,
@@ -188,6 +192,14 @@ def get_res_converters() -> Generator[Tuple[int, Tuple[ResConverter[Any], ResCon
                 array.ArrayConverter(",", range_txt_conv),
                 array.BinArrayConverter(type_info.range_oid, range_bin_conv),
             )
+        if type_info.multirange_oid and type_info.multirange_class:
+            multirange_txt_conv = range.TxtMultiRangeResultConverter(
+                type_info.multirange_class, type_info.txt_conv)
+            multirange_bin_conv = range.BinMultiRangeResultConverter(
+                type_info.multirange_class, type_info.bin_conv)
+
+            yield type_info.multirange_oid, (
+                multirange_txt_conv, multirange_bin_conv)
 
 
 # This is the mapping of all known result converters

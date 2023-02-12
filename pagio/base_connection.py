@@ -258,9 +258,9 @@ class BaseConnection:  # pylint: disable=too-many-instance-attributes
         only for server versions starting from 14.
 
         """
+        if self._protocol is None:
+            return {}
         if self._server_parameters is None:
-            if self._protocol is None:
-                return {}
             self._server_parameters = MappingProxyType(
                 self._protocol.server_parameters)
         return self._server_parameters

@@ -40,7 +40,9 @@ class ConnCase(IsolatedAsyncioTestCase):
     async def test_parameter_status(self):
         cn = await AsyncConnection(database="postgres")
         self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
+        self.assertEqual("UTF8", cn.server_parameters["client_encoding"])
         await cn.close()
+        self.assertIsNone(cn.server_parameters.get("client_encoding"))
 
     async def test_simple_query(self):
         cn = await AsyncConnection(database="postgres")

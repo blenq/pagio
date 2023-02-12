@@ -2,10 +2,10 @@
 
 from .types.numeric import (
     PGInt4Array, PGBoolArray, PGNumericArray, PGInt4Range, PGInt8Range,
-    PGNumRange, PGFloat8Array, PGFloat4Array)
+    PGNumRange, PGFloat8Array, PGFloat4Array, PGInt4MultiRange)
 from .types.dt import (
     PGTimestampArray, PGTimestampTZArray, PGDateArray, PGTimeArray,
-    PGTimestampTZRange, PGDateRange,
+    PGTimestampTZRange, PGDateRange, PGTimestampRange,
 )
 from .types.array import PGArray
 from .async_connection import AsyncConnection
