@@ -235,15 +235,6 @@ def numeric_to_pg(val: Decimal) -> Tuple[int, str, bytes, int, Format]:
     return const.NUMERICOID, f"{len_val}s", byte_val, len_val, Format.BINARY
 
 
-class PGNumRange(BasePGRange[Decimal]):
-    oid = NUMRANGEOID
-
-    def _type_check(self, val: Decimal) -> Decimal:
-        if not isinstance(val, Decimal):
-            return Decimal(val)
-        return val
-
-
 # ======== bool ============================================================= #
 
 
@@ -369,3 +360,16 @@ class PGInt8Range(PGIntRange):
 
 class PGInt8MultiRange(BaseMultiRange[int]):
     range_class = PGInt8Range
+
+
+class PGNumRange(BasePGRange[Decimal]):
+    oid = NUMRANGEOID
+
+    def _type_check(self, val: Decimal) -> Decimal:
+        if not isinstance(val, Decimal):
+            return Decimal(val)
+        return val
+
+
+class PGNumMultiRange(BaseMultiRange[Decimal]):
+    range_class = PGNumRange

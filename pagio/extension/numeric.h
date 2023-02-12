@@ -30,6 +30,7 @@
 #define NUMERICARRAYOID 1231
 #define NUMRANGEOID 3906
 #define NUMRANGEARRAYOID 3907
+#define NUMMULTIRANGEOID 4532
 
 #define REGPROCOID 24
 #define REGPROCARRAYOID 1008
@@ -123,10 +124,12 @@ PyObject *convert_pg_numeric_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numericarray_text(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numrange_txt(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numrangearray_txt(PPObject *self, char *buf, int len);
+PyObject *convert_pg_nummultirange_txt(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numeric_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numericarray_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numrange_bin(PPObject *self, char *buf, int len);
 PyObject *convert_pg_numrangearray_bin(PPObject *self, char *buf, int len);
+PyObject *convert_pg_nummultirange_bin(PPObject *self, char *buf, int len);
 
 
 int fill_numeric_info(

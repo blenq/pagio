@@ -103,6 +103,8 @@ PGTypes = {
         numeric.txt_numeric_to_python, numeric.bin_numeric_to_python,
         array_oid=const.NUMERICARRAYOID, range_oid=const.NUMRANGEOID,
         range_class=numeric.PGNumRange, range_array_oid=const.NUMRANGEARRAYOID,
+        multirange_oid=const.NUMMULTIRANGEOID,
+        multirange_class=numeric.PGNumMultiRange,
     ),
 
     const.DATEOID: PGTypeInfo(

@@ -941,6 +941,7 @@ static PyObject *PGInt4MultiRange;
 static PyObject *PGInt8Range;
 static PyObject *PGInt8MultiRange;
 static PyObject *PGNumRange;
+static PyObject *PGNumMultiRange;
 
 PyObject *
 convert_pg_int4range_txt(PPObject *self, char *buf, int len) {
@@ -1050,6 +1051,14 @@ convert_pg_numrangearray_txt(PPObject *self, char *buf, int len)
 
 
 PyObject *
+convert_pg_nummultirange_txt(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_text(
+        self, buf, buf + len, convert_pg_numeric_text, PGNumMultiRange);
+}
+
+
+PyObject *
 convert_pg_numrange_bin(PPObject *self, char *buf, int len) {
     return parse_range_binary(
         self, buf, buf + len, convert_pg_numeric_bin, PGNumRange);
@@ -1061,6 +1070,14 @@ convert_pg_numrangearray_bin(PPObject *self, char *buf, int len)
 {
     return convert_pg_array_bin(
         self, buf, len, NUMRANGEOID, convert_pg_numrange_bin);
+}
+
+
+PyObject *
+convert_pg_nummultirange_bin(PPObject *self, char *buf, int len)
+{
+    return parse_multirange_bin(
+        self, buf, buf + len, convert_pg_numeric_bin, PGNumMultiRange);
 }
 
 
@@ -1105,9 +1122,11 @@ init_numeric(void)
     PGInt8Range = PyObject_GetAttrString(module, "PGInt8Range");
     PGInt8MultiRange = PyObject_GetAttrString(module, "PGInt8MultiRange");
     PGNumRange = PyObject_GetAttrString(module, "PGNumRange");
+    PGNumMultiRange = PyObject_GetAttrString(module, "PGNumMultiRange");
     Py_DECREF(module);
     if (PGInt4Range == NULL || PGInt8Range == NULL || PGNumRange == NULL ||
-            PGInt4MultiRange == NULL || PGInt8MultiRange == NULL) {
+            PGInt4MultiRange == NULL || PGInt8MultiRange == NULL ||
+            PGNumMultiRange == NULL) {
         return -1;
     }
 

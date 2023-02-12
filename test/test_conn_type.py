@@ -10,7 +10,7 @@ from pagio import (
     Connection, sync_connection, sync_protocol, Format, ServerError, PGJson,
     ServerWarning, PGTextArray, PGInt4Range, PGInt8Range, PGText, PGNumRange,
     PGTimestampTZRange, PGDateRange, PGRegConfig, ServerNotice,
-    PGInt4MultiRange, PGInt8MultiRange,
+    PGInt4MultiRange, PGInt8MultiRange, PGNumMultiRange,
 )
 from pagio.types import txt_hstore_to_python, bin_hstore_to_python
 from pagio.zoneinfo import ZoneInfo
@@ -155,11 +155,23 @@ class ConnTypeCase(unittest.TestCase):
 
     def test_numeric_range_result(self):
         self._test_val_result(
-            "SELECT '[10,11)'::numrange;", PGNumRange(10, 11))
+            "SELECT '[10,11)'::numrange;", PGNumRange(Decimal(10), 11))
         self._test_val_result(
             "SELECT '[,)'::numrange;", PGNumRange(None, None))
         self._test_val_result(
             "SELECT 'empty'::numrange;", PGNumRange.empty())
+
+    def test_numeric_multirange_result(self):
+        self._test_val_result(
+            "SELECT '{[10,11)}'::nummultirange;",
+            PGNumMultiRange((Decimal(10), 11)))
+        self._test_val_result(
+            "SELECT '{[,)}'::nummultirange;", PGNumMultiRange((None, None)))
+        self._test_val_result(
+            "SELECT '{empty}'::nummultirange;", PGNumMultiRange())
+        self._test_val_result(
+            "SELECT '{[10,11),(13,15]}'::nummultirange;",
+            PGNumMultiRange((Decimal(10), 11), (13, 15, '(]')))
 
     def test_numeric_range_array_result(self):
         self._test_val_result(

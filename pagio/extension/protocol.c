@@ -341,6 +341,8 @@ get_converters(unsigned int type_oid) {
             convert_pg_numrange_txt, convert_pg_numrange_bin},
         numrangearray_converters[2] = {
             convert_pg_numrangearray_txt, convert_pg_numrangearray_bin},
+        nummultirange_converters[2] = {
+            convert_pg_nummultirange_txt, convert_pg_nummultirange_bin},
         bytea_converters[2] = {convert_pg_bytea_text, convert_pg_binary},
         byteaarray_converters[2] = {
             convert_pg_byteaarray_txt, convert_pg_byteaarray_bin},
@@ -483,6 +485,8 @@ get_converters(unsigned int type_oid) {
         return numrange_converters;
     case NUMRANGEARRAYOID:
         return numrangearray_converters;
+    case NUMMULTIRANGEOID:
+        return nummultirange_converters;
     case BYTEAOID:
         return bytea_converters;
     case BYTEAARRAYOID:

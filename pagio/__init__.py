@@ -3,7 +3,7 @@
 from .types.numeric import (
     PGInt4Array, PGBoolArray, PGNumericArray, PGInt4Range, PGInt8Range,
     PGNumRange, PGFloat8Array, PGFloat4Array, PGInt4MultiRange,
-    PGInt8MultiRange,
+    PGInt8MultiRange, PGNumMultiRange,
 )
 from .types.dt import (
     PGTimestampArray, PGTimestampTZArray, PGDateArray, PGTimeArray,
