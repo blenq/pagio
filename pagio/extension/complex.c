@@ -7,11 +7,17 @@
 static PyObject *
 parse_quoted(PPObject *self, char **buf, char *end, res_converter conv)
 {
+    // Parse a quoted value. Besides returning the Python value, it will also
+    // position the buf pointer right behind the quoted value.
+
     PyObject *val;
-    char *copy_buf = NULL, *val_buf;
-    char *pos = *buf + 1;
-    int escaped = 0, has_escapes;
-    int buf_len = 0, i;
+    char     *copy_buf = NULL,
+             *val_buf,
+             *pos = *buf + 1;  // position just after quote
+    int      escaped = 0,
+             has_escapes = 0,
+             buf_len = 0,
+             i;
 
     // first count the actual number of characters, and check if escapes are
     // used
@@ -24,7 +30,7 @@ parse_quoted(PPObject *self, char **buf, char *end, res_converter conv)
             has_escapes = 1;
         }
         else if (pos[0] == '\\') {
-            // backslash escapes everything, set escape flag
+            // backslash escapes everything, set escape flag and don't count
             escaped = 1;
         }
         else if (pos[0] == '"') {
@@ -33,13 +39,14 @@ parse_quoted(PPObject *self, char **buf, char *end, res_converter conv)
                 // no second quote, so it is an end quote, done
                 break;
             }
-            // second quote
+            // second quote, first one is escape, skip first one and count
+            // second one
             has_escapes = 1;
             pos += 1;
             buf_len += 1;
         }
         else {
-            // other character
+            // other character, just count
             buf_len += 1;
         }
         pos += 1;
@@ -50,35 +57,36 @@ parse_quoted(PPObject *self, char **buf, char *end, res_converter conv)
         return NULL;
     }
 
-    pos = *buf + 1;
+    pos = *buf + 1;  // reposition just after first quote again
 
     if (has_escapes) {
-        // Create temporary blob for value
+        // Create temporary blob for unescaped raw value
         copy_buf = PyMem_Malloc(buf_len);
         if (copy_buf == NULL) {
             return PyErr_NoMemory();
         }
         // Fill temp blob
-        escaped = 0;
         for (i = 0; i < buf_len; i++) {
-            if (pos[0] == '\\' || pos[0] == '"') {
+            if (*pos == '\\' || *pos == '"') {
                 // skip escape character
                 pos += 1;
             }
-            copy_buf[i] = pos[0];
+            copy_buf[i] = *pos;
             pos += 1;
         }
         val_buf = copy_buf;
+        *buf = pos + 1;  // position buf at end
     }
     else {
+        // no escapes, value between the quotes is the raw text value
         val_buf = pos;
+        *buf += buf_len + 2;  // position buf at end
     }
 
     // Convert to Python object
     val = conv(self, val_buf, buf_len);
 
     // Clean up
-    *buf = pos + 1;
     PyMem_Free(copy_buf);
 
     return val;
@@ -117,10 +125,10 @@ parse_array_text(
 {
     PyObject *vals;
     int success;
-    char delims[3] = " }";
+    char delims[] = " }";
 
     delims[0] = delim;
-    *buf += 1;
+    *buf += 1;  // position past first character '{'
     vals = PyList_New(0);
     if (vals == NULL) {
         return NULL;
@@ -129,6 +137,7 @@ parse_array_text(
         char ch = (*buf)[0];
 
         if (ch == '{') {
+            // nested array, parse sub array
             PyObject *val = parse_array_text(self, buf, end, delim, conv);
             if (val == NULL) {
                 Py_DECREF(vals);
